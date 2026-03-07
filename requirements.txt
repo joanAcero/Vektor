@@ -1,0 +1,13 @@
+yfinance
+pandas
+pandas_ta
+matplotlib
+pyyaml
+lxml
+tqdm
+requests
+numpy
+finvizfinance
+lxml
+mplfinance
+networkx

@@ -1,0 +1,8 @@
+# Env variables
+config/secrets.env
+
+# Virtual environment
+vektor-venv/
+
+# IDEA files
+.idea/

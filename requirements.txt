@@ -1,13 +1,14 @@
-yfinance
-pandas
-pandas_ta
-matplotlib
-pyyaml
-lxml
-tqdm
-requests
-numpy
-finvizfinance
-lxml
-mplfinance
-networkx
+# Pinned lower bounds; yfinance is pinned with care because its 0.2.28 release
+# silently flipped auto_adjust's default and broke price-dependent code.
+yfinance>=0.2.40
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+pyyaml>=6.0
+finvizfinance>=0.14
+lxml>=4.9
+mplfinance>=0.12
+# dev
+pytest>=8.0
+ruff>=0.5
+flask

@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VEKTOR — Run a screen</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --line: #232a33;
+    --ink: #e6edf3;
+    --muted: #8b949e;
+    --accent: #2f81f7;
+    --accent-dim: #1f6feb33;
+    --ok: #3fb950;
+    --field: #0d1117;
+    --radius: 6px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 48px 24px 80px; }
+  header { margin-bottom: 32px; }
+  h1 {
+    font-size: 15px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+    margin: 0; color: var(--ink);
+  }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .panel > .legend {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 14px;
+  }
+
+  label { display: block; }
+  .field { margin-bottom: 14px; }
+  .field:last-child { margin-bottom: 0; }
+  .field .name { font-size: 13px; margin-bottom: 4px; }
+  .field .help { font-size: 12px; color: var(--muted); margin-top: 3px; }
+
+  select, input[type=number], input[type=text] {
+    width: 100%; padding: 8px 10px;
+    background: var(--field); color: var(--ink);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    font: inherit;
+  }
+  select:focus, input:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+
+  .check { display: flex; align-items: center; gap: 8px; }
+  .check input { width: auto; }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .seg button {
+    background: var(--field); color: var(--muted); border: 0; padding: 8px 16px;
+    font: inherit; cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+
+  .mkts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .mkts label {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 6px 10px; font-size: 13px; cursor: pointer; color: var(--muted);
+  }
+  .mkts input { width: auto; }
+  .mkts label:has(input:checked) { color: var(--ink); border-color: var(--accent); background: var(--accent-dim); }
+
+  .run {
+    width: 100%; padding: 12px; margin-top: 4px;
+    background: var(--accent); color: #fff; border: 0; border-radius: var(--radius);
+    font: inherit; font-weight: 600; cursor: pointer; letter-spacing: .03em;
+  }
+  .run:disabled { opacity: .55; cursor: progress; }
+
+  #status { min-height: 20px; font-size: 13px; color: var(--muted); margin: 14px 2px; }
+  #status.err { color: #f85149; }
+  #status.ok { color: var(--ok); }
+
+  table { width: 100%; border-collapse: collapse; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  td:first-child, th:first-child { padding-left: 0; }
+  .scroll { overflow-x: auto; }
+  .muted { color: var(--muted); }
+  .hidden { display: none; }
+
+  .desc {
+    font-size: 13px; color: var(--muted); line-height: 1.55;
+    margin: -4px 0 16px; padding: 12px 14px;
+    background: var(--field); border: 1px solid var(--line);
+    border-left: 2px solid var(--accent); border-radius: var(--radius);
+  }
+  .desc:empty { display: none; }
+
+  .charts { display: grid; gap: 18px; margin-top: 18px; }
+  .chart-card { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #fff; }
+  .chart-card .cap {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+    color: var(--ink); background: var(--field); padding: 6px 10px; border-bottom: 1px solid var(--line);
+  }
+  .chart-card img { display: block; width: 100%; height: auto; }
+
+  .tabs { display:flex; gap:8px; margin:0 0 16px; }
+  .tab { background:var(--field); color:var(--muted); border:1px solid var(--line);
+         padding:8px 16px; border-radius:var(--radius); cursor:pointer; font-weight:600; }
+  .tab[aria-pressed="true"] { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .tbl { width:100%; border-collapse:collapse; font-size:14px; }
+  .tbl th, .tbl td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+  .tbl th { color:var(--muted); font-weight:600; }
+  .rot-row { cursor:pointer; }
+  .rot-row:hover { background:var(--field); }
+  .badge { padding:2px 8px; border-radius:6px; font-size:12px; font-weight:700; }
+  .st-in   { background:#052e1a; color:#4ade80; }
+  .st-lead { background:#0b2a4a; color:#60a5fa; }
+  .st-neu  { background:#1c222b; color:#9aa4b2; }
+  .st-weak { background:#3a2a06; color:#fbbf24; }
+  .st-lag  { background:#3a0a0a; color:#f87171; }
+  .timeline { display:flex; gap:2px; flex-wrap:nowrap; }
+  .cell { display:inline-block; min-width:22px; text-align:center; padding:2px 0;
+          border-radius:3px; font-size:10px; font-weight:700; font-family:ui-monospace,monospace; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>VEK<span>TOR</span></h1>
+    <div class="sub">Select a strategy and run a screen.</div>
+  </header>
+
+  <div class="tabs">
+    <button type="button" class="tab" id="tab-screen" aria-pressed="true">Screener</button>
+    <button type="button" class="tab" id="tab-monitor" aria-pressed="false">Market Monitor</button>
+  </div>
+
+  <div id="view-monitor" class="hidden">
+    <div class="panel">
+      <div class="legend">Sector rotation — follow the money</div>
+      <div class="desc">
+        SPDR sector ETFs ranked by Mansfield RS vs the S&amp;P 500, plus RS slope.
+        <b>Rotating In</b> = money starting to flow in before the sector leads (watch these for breakouts, leaders still near their MA).
+        <b>Leading</b> = already strong (often late). <b>Weakening</b> = rotating out.
+      </div>
+      <button id="load-rotation" class="run">Scan sector rotation</button>
+      <div id="monitor-status" class="muted" style="margin-top:10px"></div>
+      <div id="rotation-wrap" class="hidden" style="margin-top:14px">
+        <table id="rotation-table" class="tbl"></table>
+      </div>
+      <div id="history-wrap" class="hidden" style="margin-top:22px">
+        <div class="legend">Rotation history — when did each sector change?</div>
+        <div class="desc">
+          State week by week (oldest → newest). <b>IN</b>=Rotating In, <b>LD</b>=Leading,
+          <b>WK</b>=Weakening, <b>LG</b>=Lagging, <b>··</b>=Neutral. A sector that flipped
+          to <b>IN</b> recently is a <i>fresh</i> rotation — its leaders are likely still
+          near the MA30, so your breakouts are still entrable. Hover a cell for the date.
+        </div>
+        <div class="scroll"><table id="history-table" class="tbl"></table></div>
+      </div>
+      <div id="industry-wrap" class="hidden" style="margin-top:16px">
+        <div class="legend" id="industry-title">Industries</div>
+        <div class="scroll"><table id="industry-table" class="tbl"></table></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="view-screen">
+  <div class="panel">
+    <div class="legend">Strategy</div>
+    <div class="field">
+      <select id="strategy"></select>
+    </div>
+    <div id="strategy-desc" class="desc"></div>
+    <div id="params"></div>
+  </div>
+
+  <div class="panel">
+    <div class="legend">Market</div>
+    <div class="field">
+      <div class="seg" role="group" aria-label="Market mode">
+        <button type="button" id="mode-us" aria-pressed="true">US (Finviz)</button>
+        <button type="button" id="mode-intl" aria-pressed="false">International</button>
+      </div>
+    </div>
+
+    <div id="us-opts">
+      <div class="field">
+        <div class="name">Source</div>
+        <select id="us_source">
+          <option value="industries">Industries (≈150 fine groups)</option>
+          <option value="sectors">Sectors (≈11 broad groups)</option>
+          <option value="ticker">Ticker (check specific stocks)</option>
+        </select>
+      </div>
+
+      <div class="grid" id="rank-opts">
+        <div class="field">
+          <div class="name" id="topn-label">Top industries</div>
+          <input type="number" id="top_n" value="0" min="0" max="50" step="1">
+          <div class="help">How many top-ranked groups to scan. 0 = full market.</div>
+        </div>
+        <div class="field">
+          <div class="name">Performance window</div>
+          <select id="perf_col">
+            <option value="Perf Week">Week</option>
+            <option value="Perf Quart">Quarter</option>
+          </select>
+          <div class="help">Ranking period.</div>
+        </div>
+      </div>
+
+      <div class="field hidden" id="ticker-opts">
+        <div class="name">Tickers</div>
+        <input type="text" id="us_tickers" placeholder="e.g. RACE, ATKR, BMY">
+        <div class="help">Comma-separated. Charts the detected base for each, even if no setup matches.</div>
+      </div>
+    </div>
+
+    <div id="intl-opts" class="hidden">
+      <div class="field">
+        <div class="name">Markets</div>
+        <div class="mkts" id="mkts"></div>
+        <div class="help">None selected = all markets.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <label class="check">
+      <input type="checkbox" id="make_charts">
+      <span>Generate PNG charts (slower; written to <span class="muted">results/</span>)</span>
+    </label>
+  </div>
+
+  <button class="run" id="run">Run screen</button>
+  <div id="status"></div>
+
+  <div id="results" class="panel hidden">
+    <div class="legend"><span id="count"></span> result(s)</div>
+    <div class="scroll"><table id="table"></table></div>
+    <div class="charts" id="charts"></div>
+  </div>
+  </div><!-- /view-screen -->
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let SCHEMA = null;
+let mode = "us";
+
+async function boot() {
+  const res = await fetch("/api/strategies");
+  SCHEMA = await res.json();
+
+  // Tab switching
+  $("tab-screen").addEventListener("click", () => switchTab("screen"));
+  $("tab-monitor").addEventListener("click", () => switchTab("monitor"));
+  $("load-rotation").addEventListener("click", loadRotation);
+
+  const sel = $("strategy");
+  SCHEMA.strategies.forEach(s => {
+    const o = document.createElement("option");
+    o.value = s.key; o.textContent = s.display_name;
+    sel.appendChild(o);
+  });
+  sel.addEventListener("change", renderParams);
+  renderParams();
+
+  const mk = $("mkts");
+  SCHEMA.intl_markets.forEach(m => {
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="checkbox" value="${m.code}"> ${m.code} <span class="muted">· ${m.name}</span>`;
+    mk.appendChild(l);
+  });
+
+  $("mode-us").addEventListener("click", () => setMode("us"));
+  $("mode-intl").addEventListener("click", () => setMode("international"));
+  $("us_source").addEventListener("change", updateUsSource);
+  updateUsSource();
+  $("run").addEventListener("click", runScreen);
+}
+
+function currentStrategy() {
+  const key = $("strategy").value;
+  return SCHEMA.strategies.find(s => s.key === key);
+}
+
+function renderParams() {
+  const box = $("params");
+  box.innerHTML = "";
+  const s = currentStrategy();
+  $("strategy-desc").textContent = s.description || "";
+  if (!s.params.length) {
+    box.innerHTML = '<div class="help">This strategy has no parameters.</div>';
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  s.params.forEach(p => {
+    const f = document.createElement("div");
+    f.className = "field";
+    if (p.field_type === "bool") {
+      f.innerHTML = `<label class="check"><input type="checkbox" data-param="${p.name}" ${p.default ? "checked":""}><span>${p.name}</span></label>`
+                  + (p.help ? `<div class="help">${p.help}</div>` : "");
+    } else if (p.field_type === "choice") {
+      const opts = (p.choices || []).map(c =>
+        `<option value="${c}" ${c === p.default ? "selected" : ""}>${c}</option>`).join("");
+      f.innerHTML = `<div class="name">${p.name}</div>`
+                  + `<select data-param="${p.name}">${opts}</select>`
+                  + (p.help ? `<div class="help">${p.help}</div>` : "");
+    } else {
+      const step = p.field_type === "float" ? "any" : "1";
+      f.innerHTML = `<div class="name">${p.name}</div>`
+                  + `<input type="number" step="${step}" data-param="${p.name}" value="${p.default}">`
+                  + (p.help ? `<div class="help">${p.help}</div>` : "");
+    }
+    grid.appendChild(f);
+  });
+  box.appendChild(grid);
+}
+
+function setMode(m) {
+  mode = m;
+  $("mode-us").setAttribute("aria-pressed", m === "us");
+  $("mode-intl").setAttribute("aria-pressed", m === "international");
+  $("us-opts").classList.toggle("hidden", m !== "us");
+  $("intl-opts").classList.toggle("hidden", m !== "international");
+}
+
+function updateUsSource() {
+  const src = $("us_source").value;
+  const isTicker = src === "ticker";
+  $("rank-opts").classList.toggle("hidden", isTicker);
+  $("ticker-opts").classList.toggle("hidden", !isTicker);
+  $("topn-label").textContent = src === "sectors" ? "Top sectors" : "Top industries";
+}
+
+function collectParams() {
+  const s = currentStrategy();
+  const out = {};
+  s.params.forEach(p => {
+    const el = document.querySelector(`[data-param="${p.name}"]`);
+    if (!el) return;
+    out[p.name] = p.field_type === "bool" ? el.checked
+                : p.field_type === "choice" || p.field_type === "text" ? el.value
+                : p.field_type === "float" ? parseFloat(el.value)
+                : parseInt(el.value, 10);
+  });
+  return out;
+}
+
+async function runScreen() {
+  const btn = $("run");
+  const status = $("status");
+  btn.disabled = true;
+  status.className = "";
+  status.textContent = "Running… fetching prices and scanning. This can take a minute.";
+
+  const usMarket = () => {
+    const src = $("us_source").value;
+    const m = { mode: "us", us_source: src };
+    if (src === "ticker") {
+      m.tickers = $("us_tickers").value;
+    } else {
+      m.top_n_industries = parseInt($("top_n").value, 10);
+      m.perf_col = $("perf_col").value;
+    }
+    return m;
+  };
+
+  const body = {
+    strategy: $("strategy").value,
+    params: collectParams(),
+    make_charts: $("make_charts").checked,
+    market: mode === "us"
+      ? usMarket()
+      : { mode: "international",
+          intl_codes: [...document.querySelectorAll("#mkts input:checked")].map(c => c.value) }
+  };
+
+  try {
+    const res = await fetch("/api/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Run failed");
+    renderResults(data);
+    status.className = "ok";
+    if (data.count) {
+      status.textContent = `Done — ${data.count} setup(s) found.`;
+    } else if (data.charts && Object.keys(data.charts).length) {
+      status.textContent = data.note || "Done — no setup matched; showing detected bases.";
+    } else {
+      status.textContent = "Done — no setups matched.";
+    }
+  } catch (e) {
+    status.className = "err";
+    status.textContent = e.message;
+    $("results").classList.add("hidden");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderResults(data) {
+  const box = $("results");
+  const table = $("table");
+  const gallery = $("charts");
+  const charts = data.charts || {};
+  $("count").textContent = data.count;
+
+  // Build the table only when there are matched rows.
+  if (data.count) {
+    let html = "<thead><tr>" + data.columns.map(c => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+    html += data.rows.map(r =>
+      "<tr>" + r.map(v => `<td>${v === null ? '<span class="muted">—</span>' : v}</td>`).join("") + "</tr>"
+    ).join("");
+    html += "</tbody>";
+    table.innerHTML = html;
+  } else {
+    table.innerHTML = "";
+  }
+
+  // Charts: from matched rows AND any diagnostic charts (ticker mode returns
+  // charts even with zero matches).
+  gallery.innerHTML = "";
+  const shown = new Set();
+  const addCard = (ticker, url) => {
+    if (!url || shown.has(ticker)) return;
+    shown.add(ticker);
+    const card = document.createElement("div");
+    card.className = "chart-card";
+    card.innerHTML = `<div class="cap">${ticker}</div>`
+                   + `<img loading="lazy" alt="Chart for ${ticker}" src="${url}?t=${Date.now()}">`;
+    gallery.appendChild(card);
+  };
+  const tickerIdx = data.columns.indexOf("Ticker");
+  if (data.count && tickerIdx !== -1) {
+    data.rows.forEach(r => addCard(r[tickerIdx], charts[r[tickerIdx]]));
+  }
+  // Any remaining charts (diagnostic tickers that didn't match).
+  Object.entries(charts).forEach(([ticker, url]) => addCard(ticker, url));
+
+  // Show the panel if there's anything to show (rows or charts).
+  if (data.count || Object.keys(charts).length) {
+    box.classList.remove("hidden");
+  } else {
+    box.classList.add("hidden");
+  }
+}
+
+function switchTab(which) {
+  const screen = which === "screen";
+  $("tab-screen").setAttribute("aria-pressed", screen);
+  $("tab-monitor").setAttribute("aria-pressed", !screen);
+  $("view-screen").classList.toggle("hidden", !screen);
+  $("view-monitor").classList.toggle("hidden", screen);
+}
+
+const STATE_CLASS = {
+  "Rotating In": "st-in", "Leading": "st-lead", "Neutral": "st-neu",
+  "Weakening": "st-weak", "Lagging": "st-lag"
+};
+
+async function loadRotation() {
+  const btn = $("load-rotation");
+  const status = $("monitor-status");
+  btn.disabled = true;
+  status.textContent = "Scanning sector ETFs vs S&P 500… (downloading weekly data)";
+  try {
+    const res = await fetch("/api/rotation");
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderRotation(data.sectors || []);
+    renderHistory(data.history || {dates: [], sectors: []});
+    status.textContent = `Done — ${(data.sectors || []).length} sectors ranked. Click a sector to see its industries.`;
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const STATE_ABBR = {
+  "Rotating In": "IN", "Leading": "LD", "Neutral": "··",
+  "Weakening": "WK", "Lagging": "LG"
+};
+
+function renderHistory(hist) {
+  const wrap = $("history-wrap");
+  const t = $("history-table");
+  const sectors = hist.sectors || [];
+  if (!sectors.length) { wrap.classList.add("hidden"); return; }
+
+  // Column headers: show every 4th date to keep it readable.
+  const dates = sectors[0].dates || hist.dates || [];
+  let html = "<thead><tr><th>Sector</th><th>Now</th><th>Changed</th><th>State over time (oldest → newest)</th></tr></thead><tbody>";
+  html += sectors.map(s => {
+    const cls = STATE_CLASS[s.current_state] || "";
+    const changed = (s.changed_weeks_ago === null || s.changed_weeks_ago === undefined)
+      ? '<span class="muted">no change</span>'
+      : `${s.changed_weeks_ago}w ago`;
+    const cells = s.states.map((st, i) => {
+      const c = STATE_CLASS[st] || "";
+      const d = (s.dates && s.dates[i]) ? s.dates[i] : "";
+      return `<span class="cell ${c}" title="${d}: ${st}">${STATE_ABBR[st] || "?"}</span>`;
+    }).join("");
+    return `<tr><td>${s.sector} <span class="muted">${s.etf}</span></td>`
+         + `<td><span class="badge ${cls}">${s.current_state}</span></td>`
+         + `<td>${changed}</td>`
+         + `<td><div class="timeline">${cells}</div></td></tr>`;
+  }).join("");
+  html += "</tbody>";
+  t.innerHTML = html;
+  wrap.classList.remove("hidden");
+}
+
+function renderRotation(sectors) {
+  const wrap = $("rotation-wrap");
+  const t = $("rotation-table");
+  if (!sectors.length) { wrap.classList.add("hidden"); return; }
+  let html = "<thead><tr><th>Sector</th><th>ETF</th><th>State</th>"
+           + "<th>RS</th><th>RS slope</th><th>Δ4w</th><th>Cross↑</th></tr></thead><tbody>";
+  html += sectors.map(s => {
+    const cls = STATE_CLASS[s.state] || "";
+    return `<tr class="rot-row" data-sector="${s.sector}">`
+      + `<td>${s.sector}</td><td class="muted">${s.etf}</td>`
+      + `<td><span class="badge ${cls}">${s.state}</span></td>`
+      + `<td>${s.rs}</td><td>${s.rs_slope}</td>`
+      + `<td>${s.rs_change_4w ?? "—"}</td>`
+      + `<td>${s.crossed_up ? "✓" : ""}</td></tr>`;
+  }).join("");
+  html += "</tbody>";
+  t.innerHTML = html;
+  wrap.classList.remove("hidden");
+
+  // Click a sector -> load its industries
+  t.querySelectorAll(".rot-row").forEach(row => {
+    row.addEventListener("click", () => loadIndustries(row.dataset.sector));
+  });
+}
+
+async function loadIndustries(sector) {
+  const wrap = $("industry-wrap");
+  const title = $("industry-title");
+  const t = $("industry-table");
+  title.textContent = `Industries ranked by strength — ${sector}`;
+  t.innerHTML = "<tbody><tr><td class='muted'>Loading…</td></tr></tbody>";
+  wrap.classList.remove("hidden");
+  try {
+    const res = await fetch("/api/rotation?sector=" + encodeURIComponent(sector));
+    const data = await res.json();
+    const inds = data.industries || [];
+    if (!inds.length) { t.innerHTML = "<tbody><tr><td class='muted'>No industry data.</td></tr></tbody>"; return; }
+    t.innerHTML = "<thead><tr><th>#</th><th>Industry</th></tr></thead><tbody>"
+      + inds.map(i => `<tr><td class="muted">${i.rank}</td><td>${i.industry}</td></tr>`).join("")
+      + "</tbody>";
+  } catch (e) {
+    t.innerHTML = `<tbody><tr><td class='muted'>Error: ${e.message}</td></tr></tbody>`;
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

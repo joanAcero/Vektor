@@ -1,0 +1,35 @@
+# config/default.yaml
+# Run configuration for VEKTOR.
+
+strategy: weinstein          # default strategy; override with --strategy
+
+# Params are namespaced PER STRATEGY. Only the block matching the selected
+# strategy is read, so switching strategies (e.g. --strategy sma_cross) needs
+# no other edits. Omit a strategy's block entirely to use its declared defaults.
+strategy_params:
+
+  weinstein:
+    sma_weeks: 30
+    lookback_weeks: 36
+    min_touches: 2
+    min_sup_touches: 2
+    touch_tolerance: 0.01      # fraction, 0.01 == 1%
+    require_volume: false
+
+  sma_cross:
+    sma_weeks: 30
+    slope_lookback: 4
+
+market:
+  mode: us                   # us | international
+  top_n_industries: 0        # 0 = scan FULL market (default); >0 = only top-N industries
+  perf_col: Perf Week        # "Perf Week" or "Perf Quart"
+  intl_codes: []             # e.g. [DE, GB, FR, IT, ES]; empty == all non-US
+                             # (fetched live from Wikipedia, not hardcoded)
+
+data_start: "2020-01-01"
+chart_start: "2021-01-01"
+output_dir: results
+make_charts: true
+strict: false
+cache_max_age_hours: 12

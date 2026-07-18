@@ -9,12 +9,40 @@ strategy: weinstein          # default strategy; override with --strategy
 strategy_params:
 
   weinstein:
+    base_length: long        # short | medium | long | custom
+                                # NOTE: when base_length != custom, the preset table in
+                                # weinstein_setup.py overrides lookback_weeks, min_base_weeks
+                                # and min_sup_touches below (medium preset: 30, 14, 2) --
+                                # they only take effect if you set base_length: custom.
     sma_weeks: 30
-    lookback_weeks: 36
-    min_touches: 2
-    min_sup_touches: 2
-    touch_tolerance: 0.01      # fraction, 0.01 == 1%
+    lookback_weeks: 36         # only used when base_length: custom (medium preset uses 30)
+    min_base_weeks: 10         # only used when base_length: custom (medium preset uses 14)
+    min_touches: 3             # resistance touches -- always active, no preset override
+    min_sup_touches: 2         # only used when base_length: custom (medium preset also uses 2)
+    touch_tolerance: 0.01     # fraction, 0.015 == 1.5%
+    max_base_breach_frac: 0.10
+    max_range_vs_decline: 1.2
+    max_dist_to_breakout: 30.0
+    min_prior_decline: 0.15
+    max_ma_decline_pct: 8.0
+    max_ma_rise_pct: 1.5
     require_volume: false
+    require_rs_positive: false
+    rs_period: 52
+
+  # "Follow the money": Stage-2 leaders with positive RS that are NOT yet
+  # overextended above their 30W MA. Complement to weinstein (that one finds
+  # bases about to start Stage 2; this finds Stage-2 trends still worth
+  # following). Defaults below are strategies/momentum_leaders.py's own
+  # ParamSpec defaults, not tuned against your chart examples the way
+  # weinstein's were -- treat these as a starting point.
+  momentum_leaders:
+    sma_weeks: 30
+    slope_lookback: 5          # bars used to measure MA slope (must be rising)
+    max_dist_above_ma: 20.0    # max %% close may sit ABOVE the MA (anti-overextension cap)
+    min_dist_above_ma: 0.0     # min %% above the MA (0 = just needs to be above it)
+    min_rs: 0.0                # min Mansfield RS (0 = merely outperforming; raise to be stricter)
+    rs_period: 52
 
   sma_cross:
     sma_weeks: 30
@@ -22,8 +50,18 @@ strategy_params:
 
 market:
   mode: us                   # us | international
-  top_n_industries: 0        # 0 = scan FULL market (default); >0 = only top-N industries
-  perf_col: Perf Week        # "Perf Week" or "Perf Quart"
+  source: rotation         # industries | sectors | rotation | ticker
+                              # "industries"/"sectors": rank by raw Finviz performance
+                              #   (top_n_industries / perf_col below).
+                              # "rotation": run the sector money-flow monitor first
+                              #   (src/rotation.py) and scan every liquid ticker in
+                              #   sectors currently in rotation_states below -- this is
+                              #   money-flow-driven selection instead of raw performance
+                              #   ranking.
+  rotation_states: [Rotating In]   # used when source: rotation. src/rotation.py states:
+                                    # Rotating In | Leading | Neutral | Weakening | Lagging
+  top_n_industries: 10       # 0 = scan FULL market; >0 = only top-N industries.
+  perf_col: Perf Quart        # "Perf Week" or "Perf Quart"
   intl_codes: []             # e.g. [DE, GB, FR, IT, ES]; empty == all non-US
                              # (fetched live from Wikipedia, not hardcoded)
 

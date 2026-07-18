@@ -6,3 +6,6 @@ vektor-venv/
 
 # IDEA files
 .idea/
+
+.env
+

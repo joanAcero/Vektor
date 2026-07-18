@@ -10,7 +10,6 @@ To disable one:      comment out or remove its import line.
 """
 
 from . import weinstein_setup   # noqa: F401
-from . import sma_cross         # noqa: F401
 from . import momentum_leaders  # noqa: F401
 
 # Add new strategies here, e.g.:

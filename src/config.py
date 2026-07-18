@@ -31,10 +31,13 @@ class RunConfig:
     strategy_params: dict[str, Any]
     market_mode: str                 # "us" | "international"
     intl_codes: list[str] = field(default_factory=list)
-    us_source: str = "industries"   # "industries" | "sectors" | "ticker"
+    us_source: str = "industries"   # "industries" | "sectors" | "rotation" | "ticker"
     us_tickers: list[str] = field(default_factory=list)  # used when us_source=="ticker"
     us_top_n_industries: int = 0
     us_perf_col: str = "Perf Week"
+    us_rotation_states: list[str] = field(default_factory=lambda: ["Rotating In"])
+    # ^ used when us_source=="rotation": which src/rotation.py states to scan
+    #   within (see market_us.py::collect_us_by_rotation).
     data_start: str = "2020-01-01"
     chart_start: str = "2021-01-01"
     output_dir: str = "results"
@@ -134,8 +137,18 @@ def load_config(path: str | Path, overrides: dict[str, Any] | None = None) -> Ru
         strategy_params=params,
         market_mode=mode,
         intl_codes=list(market.get("intl_codes", []) or []),
+        # NOTE: us_source and us_rotation_states were previously NOT read here
+        # at all -- load_config() always fell back to RunConfig's dataclass
+        # default ("industries"), silently ignoring anything set under
+        # market.source in the YAML. Only webapp.py (which builds RunConfig
+        # directly, bypassing load_config) could actually change it. That
+        # means run.py's CLI and any script using load_config() -- including
+        # daily_report.py -- could never select "sectors" or the new
+        # "rotation" mode via config/default.yaml until now.
+        us_source=market.get("source", "industries"),
         us_top_n_industries=int(market.get("top_n_industries", 0)),
         us_perf_col=market.get("perf_col", "Perf Week"),
+        us_rotation_states=list(market.get("rotation_states", ["Rotating In"]) or ["Rotating In"]),
         data_start=data.get("data_start", "2020-01-01"),
         chart_start=data.get("chart_start", "2021-01-01"),
         output_dir=data.get("output_dir", "results"),

@@ -12,3 +12,6 @@ mplfinance>=0.12
 pytest>=8.0
 ruff>=0.5
 flask
+
+requests>=2.31
+python-dotenv>=1.0

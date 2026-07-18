@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -49,7 +50,7 @@ def _scan(cfg: RunConfig, screener: Screener, strategy) -> pd.DataFrame:
     if cfg.market_mode == "us":
         try:
             from src.market_us import (collect_us_candidates, collect_us_by_sector,
-                                       collect_explicit_tickers)
+                                       collect_us_by_rotation, collect_explicit_tickers)
         except ImportError:
             log.error("US market source (src/market_us.py) not found.")
             return pd.DataFrame()
@@ -73,6 +74,8 @@ def _scan(cfg: RunConfig, screener: Screener, strategy) -> pd.DataFrame:
 
             if source == "sectors":
                 tickers, meta_df = collect_us_by_sector(cfg.us_top_n_industries, cfg.us_perf_col)
+            elif source == "rotation":
+                tickers, meta_df = collect_us_by_rotation(screener.loader, states=cfg.us_rotation_states)
             else:  # "industries" (or full market when top_n<=0)
                 tickers, meta_df = collect_us_candidates(cfg.us_top_n_industries, cfg.us_perf_col)
 
@@ -121,6 +124,8 @@ def _scan(cfg: RunConfig, screener: Screener, strategy) -> pd.DataFrame:
 
 
 def run(cfg: RunConfig) -> pd.DataFrame:
+
+
     load_strategies("strategies")
     strategy = cfg.build_strategy()
     log.info("Strategy: %s | params: %s", strategy.name, strategy.params)

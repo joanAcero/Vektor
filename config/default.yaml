@@ -17,7 +17,7 @@ strategy_params:
     sma_weeks: 30
     lookback_weeks: 36         # only used when base_length: custom (medium preset uses 30)
     min_base_weeks: 10         # only used when base_length: custom (medium preset uses 14)
-    min_touches: 3             # resistance touches -- always active, no preset override
+    min_touches: 2             # resistance touches -- always active, no preset override
     min_sup_touches: 2         # only used when base_length: custom (medium preset also uses 2)
     touch_tolerance: 0.01     # fraction, 0.015 == 1.5%
     max_base_breach_frac: 0.10
@@ -58,7 +58,7 @@ market:
                               #   sectors currently in rotation_states below -- this is
                               #   money-flow-driven selection instead of raw performance
                               #   ranking.
-  rotation_states: [Rotating In]   # used when source: rotation. src/rotation.py states:
+  rotation_states: [hunt, watch]   # used when source: rotation. src/rotation.py states:
                                     # Rotating In | Leading | Neutral | Weakening | Lagging
   top_n_industries: 10       # 0 = scan FULL market; >0 = only top-N industries.
   perf_col: Perf Quart        # "Perf Week" or "Perf Quart"

@@ -1,41 +1,46 @@
 """
 rotation.py
 -----------
-Money-flow / sector-rotation monitor.
+Sector selection for Weinstein Stage 1 -> Stage 2 stock breakout hunting.
 
-The idea (Weinstein): a stock's sector explains a large share of its move, so
-you want to be hunting breakouts INSIDE sectors that money is rotating INTO —
-ideally BEFORE that rotation is obvious and the leaders are already extended.
+Weinstein's rule (Chapter 6 of *Secrets for Profiting in Bull and Bear
+Markets*) is explicit: buy stocks breaking out of Stage 1 bases in sectors
+that are THEMSELVES in Stage 2 with positive Mansfield relative strength.
+The sector tailwind is what makes individual breakouts stick; hunting inside
+a Stage 3 top or a Stage 4 decline fights the tape.
 
-Most people watch "is the sector RS > 0 now?". That is late: by the time RS
-crosses zero, much of the move has happened. This module measures FOUR things
-per sector so you can catch the turn early:
+This module produces exactly one thing: a list of sector ETFs labeled
+`hunt`, `watch`, or `avoid`, for consumption by
+`market_us.collect_us_by_rotation`.
 
-  1. rs                — current Mansfield RS vs the S&P 500 (level: leading or lagging?)
-  2. rs_slope           — least-squares slope of RS over recent weeks (direction)
-  3. rs_accel           — change in slope vs the PRIOR window (is the move
-                          steepening or losing steam -- not just positive)
-  4. crossed_up         — RS just crossed its own signal line THIS week (the
-                          discrete trigger moment, not a continuous trend read)
-  + changed_weeks_ago   — how long the CURRENT state has held (a sector that
-                          flipped to Rotating In yesterday and one that's been
-                          there for four months look identical on rs/rs_slope
-                          alone; this is what tells them apart)
+Two independent checks per sector:
 
-A sector with rs still slightly negative but a strongly positive rs_slope is
-rotating INTO leadership. A positive rs_accel on top of that means it's not
-just rotating in, it's accelerating while doing so.
+  1. Sector STAGE on its own weekly chart (30W MA + price + prior trend).
+     This was missing from the previous version and is what turns "money
+     seems to be flowing in" into a Weinstein-valid sector call: a rising
+     RS line inside a Stage 4 decline is a countertrend bounce, not an
+     opportunity.
 
-Two levels:
-  * sector_rotation()   — the 11 SPDR sector ETFs vs SPY/^GSPC.
-  * industry_rotation() — Finviz industries within a chosen sector, ranked by
-                          recent relative performance (uses FinvizEngine).
-                          NOTE: this one currently ignores sector_name entirely
-                          (a pre-existing bug) -- see market_us.py's
-                          collect_us_by_rotation() docstring. Not touched here.
+  2. Sector Mansfield RS vs the market benchmark (SPY).
 
-Pure-ish logic: it takes a DataLoader (for prices) and, for the industry view,
-a FinvizEngine. No Flask, no printing — callers format the output.
+Combined:
+
+  hunt   -- sector in Stage 2 AND Mansfield RS > 0
+            (textbook Weinstein: leadership confirmed, tailwind in place)
+
+  watch  -- sector in Stage 1 AND Mansfield RS slope > 0
+            (sector still basing but money starting to flow in;
+            not yet actionable, but earliest component stocks may lead)
+
+  avoid  -- Stage 3, Stage 4, or Stage 1/2 without upward RS momentum
+
+Benchmark: SPY, not ^GSPC. yfinance with `auto_adjust=True` returns total-
+return prices for both SPY and the SPDR sector ETFs; ^GSPC is a price index
+that excludes dividends, which introduced a systematic ~2%/yr bias favoring
+high-yield sectors (XLU, XLP, XLRE, XLE) over low-yield ones (XLK, XLY) in
+every Mansfield RS calculation. See `src/benchmarks.py`.
+
+Pure logic: takes a DataLoader, returns dicts. No Flask, no printing.
 """
 
 from __future__ import annotations
@@ -45,12 +50,12 @@ import logging
 import numpy as np
 import pandas as pd
 
-from src.benchmarks import get_weekly_close, mansfield_rs
+from src.benchmarks import benchmark_for, get_weekly_close, mansfield_rs
 
 log = logging.getLogger(__name__)
 
-# SPDR sector ETFs. These track the 11 GICS sectors and have clean price data,
-# which is where Mansfield RS behaves best.
+# SPDR sector ETFs. These track the 11 GICS sectors, are total-return under
+# yfinance auto_adjust, and are the standard Weinstein-school sector proxies.
 SECTOR_ETFS: dict[str, str] = {
     "XLK":  "Technology",
     "XLE":  "Energy",
@@ -65,17 +70,36 @@ SECTOR_ETFS: dict[str, str] = {
     "XLC":  "Communication Services",
 }
 
-_SP500 = "^GSPC"
 
+# ------------------------------------------------------------------
+# TUNABLES  (defaults; overridable by caller)
+# ------------------------------------------------------------------
+
+# Stage detection
+DEFAULT_SMA_WEEKS = 30           # Weinstein's 30W MA
+DEFAULT_SLOPE_WEEKS = 5          # window for measuring MA slope
+DEFAULT_PRIOR_OFFSET_WEEKS = 20  # how far back to sample "prior" trend
+DEFAULT_FLAT_SLOPE_PCT = 0.15    # |slope| below this % of MA counts as "flat"
+
+# Relative strength
+DEFAULT_RS_PERIOD = 52           # Mansfield RS lookback
+DEFAULT_RS_SIGNAL_WEEKS = 10     # RS signal-line MA (for the cross-up flag)
+DEFAULT_RS_SLOPE_EPS = 0.05      # |RS slope| below this counts as "flat"
+
+# History / freshness
+DEFAULT_HISTORY_WEEKS = 26       # how many weeks of state to backfill
+
+
+# ------------------------------------------------------------------
+# NUMERICAL HELPERS
+# ------------------------------------------------------------------
 
 def _regression_slope(values: pd.Series) -> float:
     """
     Least-squares slope of `values` against a plain week index (0, 1, 2, ...).
 
-    Replaces a naive (last - first) / n secant, which only looks at the two
-    ENDPOINTS of the window -- a sector that spiked mid-window and gave it all
-    back reads identically to one that moved smoothly, as long as the start
-    and end points happen to match. A regression uses every point.
+    Uses every point in the window, unlike a naive (last - first) / n secant
+    which is fooled by mid-window spikes that give back to the endpoints.
     """
     n = len(values)
     if n < 2:
@@ -86,107 +110,205 @@ def _regression_slope(values: pd.Series) -> float:
     return float(slope)
 
 
-def _rs_metrics(rs: pd.Series, slope_weeks: int, signal_weeks: int) -> dict | None:
+# ------------------------------------------------------------------
+# WEINSTEIN STAGE DETECTION on a sector ETF's OWN weekly chart
+# ------------------------------------------------------------------
+
+def _sector_stage(weekly_close: pd.Series,
+                  sma_weeks: int = DEFAULT_SMA_WEEKS,
+                  slope_weeks: int = DEFAULT_SLOPE_WEEKS,
+                  prior_offset_weeks: int = DEFAULT_PRIOR_OFFSET_WEEKS,
+                  flat_slope_pct: float = DEFAULT_FLAT_SLOPE_PCT) -> str:
     """
-    Compute RS level, slope, acceleration, recent change and a cross-up flag.
-    `rs` is the FULL historical Mansfield RS series for one symbol (already
-    dropna'd) -- computed once by the caller and shared with the freshness
-    calculation, rather than recomputed per metric.
-    Returns None if there isn't enough overlapping history.
+    Weinstein 4-stage classification of a sector ETF's own weekly chart:
+
+      stage1  -- basing:    MA flat AND prior MA was clearly falling
+      stage2  -- advancing: price > MA AND MA slope clearly positive
+      stage3  -- topping:   MA flat AND prior MA was clearly rising
+      stage4  -- declining: MA slope clearly negative AND price < MA
+      unknown -- insufficient history
+
+    `flat_slope_pct` is expressed as a percentage of the MA level, so the
+    "flat" threshold is scale-invariant across sectors at any price level.
+    A default of 0.15 means "|slope| < 0.15% of the MA per week".
+
+    Note: Stage 1 vs Stage 3 look identical on a snapshot of the MA
+    (both are flat). They are distinguished by what preceded them: Stage 1
+    follows a Stage 4 decline, Stage 3 follows a Stage 2 advance. We check
+    the slope of the MA `prior_offset_weeks` weeks ago to decide.
     """
-    # Need enough history for TWO consecutive slope windows (to measure
-    # acceleration), not just one.
-    min_len = max(2 * slope_weeks, signal_weeks) + 1
-    if len(rs) < min_len:
+    if len(weekly_close) < sma_weeks + prior_offset_weeks + slope_weeks + 1:
+        return "unknown"
+
+    ma = weekly_close.rolling(sma_weeks).mean().dropna()
+    if len(ma) < prior_offset_weeks + slope_weeks + 1:
+        return "unknown"
+
+    price_now = float(weekly_close.iloc[-1])
+    ma_now = float(ma.iloc[-1])
+    if ma_now <= 0:
+        return "unknown"
+
+    # Current MA slope, as % of MA level.
+    slope_now = _regression_slope(ma.iloc[-(slope_weeks + 1):])
+    slope_now_pct = (slope_now / ma_now) * 100
+
+    # Prior MA slope, ending `prior_offset_weeks` bars ago.
+    end = -prior_offset_weeks
+    start = end - slope_weeks - 1
+    prior_window = ma.iloc[start:end]
+    slope_prev = _regression_slope(prior_window)
+    ma_prev_level = float(prior_window.iloc[-1])
+    slope_prev_pct = (slope_prev / ma_prev_level) * 100 if ma_prev_level > 0 else 0.0
+
+    above_ma = price_now > ma_now
+
+    # Clear trending cases first.
+    if slope_now_pct > flat_slope_pct and above_ma:
+        return "stage2"
+    if slope_now_pct < -flat_slope_pct and not above_ma:
+        return "stage4"
+
+    # MA is flat -- disambiguate by the prior trend.
+    if slope_prev_pct < -flat_slope_pct:
+        return "stage1"  # was falling, now flat = basing
+    if slope_prev_pct > flat_slope_pct:
+        return "stage3"  # was rising, now flat = topping
+
+    # Prior also flat: extended chop. Fall back on price vs MA.
+    return "stage1" if above_ma else "stage4"
+
+
+# ------------------------------------------------------------------
+# RELATIVE STRENGTH metrics vs the market benchmark
+# ------------------------------------------------------------------
+
+def _rs_metrics(rs: pd.Series,
+                slope_weeks: int = DEFAULT_SLOPE_WEEKS,
+                signal_weeks: int = DEFAULT_RS_SIGNAL_WEEKS) -> dict | None:
+    """
+    Compute RS level, slope and the fresh cross-up flag.
+    Returns None if there isn't enough history.
+    """
+    if len(rs) < max(slope_weeks + 1, signal_weeks + 2):
         return None
 
     rs_now = float(rs.iloc[-1])
+    rs_slope = _regression_slope(rs.iloc[-(slope_weeks + 1):])
 
-    window_now = rs.iloc[-(slope_weeks + 1):]
-    rs_slope = _regression_slope(window_now)
-
-    # Acceleration: this window's slope vs the slope measured over the PRIOR
-    # window of the same length. Positive = the rotation is steepening (money
-    # flowing in faster each week, not just steadily); negative = decelerating
-    # even if rs_slope is still positive. This is the "getting more and more
-    # strength" read that a single slope number can't distinguish on its own.
-    window_prev = rs.iloc[-(2 * slope_weeks + 1):-slope_weeks]
-    rs_slope_prev = _regression_slope(window_prev)
-    rs_accel = rs_slope - rs_slope_prev
-
-    # Short average of RS; a cross above it marks the turn.
+    # Weinstein's textbook RS trigger: cross above the RS moving average.
+    # Kept as a flag for information; not part of classification below,
+    # so the rule stays simple and predictable. Fold it in downstream if
+    # you want to relax `hunt` to include stage2 sectors with RS < 0 that
+    # just crossed up.
     rs_sig = rs.rolling(signal_weeks).mean()
     crossed_up = bool(
         len(rs_sig.dropna()) >= 2
         and rs.iloc[-1] > rs_sig.iloc[-1]
         and rs.iloc[-2] <= rs_sig.iloc[-2]
     )
-    # 4-week RS change, a quick "acceleration" read (kept for backward compat
-    # with existing consumers; rs_accel above is the more principled version).
-    rs_change_4w = float(rs_now - rs.iloc[-5]) if len(rs) >= 5 else np.nan
-
     return {
         "rs": round(rs_now, 2),
         "rs_slope": round(rs_slope, 3),
-        "rs_accel": round(rs_accel, 3),
-        "rs_change_4w": round(rs_change_4w, 2) if np.isfinite(rs_change_4w) else None,
-        "crossed_up": crossed_up,
+        "rs_crossed_up": crossed_up,
     }
 
 
-def _classify(rs: float, rs_slope: float, slope_eps: float = 0.05) -> str:
-    """
-    Turn (level, slope) into a human rotation state. The valuable quadrant for
-    an early breakout hunter is 'Rotating In' — not yet leading, but turning up
-    with a MEANINGFUL slope (flat noise near zero is treated as neutral, not a
-    rotation signal). slope_eps sets how steep the RS must move to count.
-    """
-    leading = rs > 0
-    rising = rs_slope > slope_eps
-    falling = rs_slope < -slope_eps
-    if leading and rising:
-        return "Leading"          # already strong AND getting stronger (often late)
-    if not leading and rising:
-        return "Rotating In"      # <-- the early signal: money starting to flow in
-    if leading and falling:
-        return "Weakening"        # still strong but losing steam (rotating out)
-    if not leading and falling:
-        return "Lagging"          # weak and getting weaker (avoid)
-    return "Neutral"              # flat: no clear rotation either way
+# ------------------------------------------------------------------
+# CLASSIFICATION: hunt / watch / avoid
+# ------------------------------------------------------------------
+
+_STATE_HUNT = "hunt"
+_STATE_WATCH = "watch"
+_STATE_AVOID = "avoid"
+
+STATES: tuple[str, ...] = (_STATE_HUNT, _STATE_WATCH, _STATE_AVOID)
 
 
-def _rolling_rs_series(rs: pd.Series, slope_weeks: int, slope_eps: float,
-                       tail_weeks: int | None = None) -> pd.DataFrame:
+def _classify(stage: str, rs: float, rs_slope: float,
+              rs_slope_eps: float = DEFAULT_RS_SLOPE_EPS) -> str:
     """
-    Per-week (rs, slope, state) history, using the SAME regression slope and
-    _classify() as the current-snapshot calculation -- shared so a sector's
-    state for a given week is identical whether read from today's snapshot or
-    from history. Trims to `tail_weeks` (plus the slope_weeks needed to seed
-    the first slope) BEFORE computing, so this stays cheap even though it's
-    now called from sector_rotation()'s freshness lookup too, not just
-    rotation_history().
-    """
-    if tail_weeks:
-        rs = rs.tail(tail_weeks + slope_weeks)
-    if len(rs) <= slope_weeks:
-        return pd.DataFrame(columns=["rs", "slope", "state"])
+    Weinstein-native mapping:
 
-    idx = rs.index[slope_weeks:]
-    slopes = [_regression_slope(rs.iloc[i - slope_weeks:i + 1])
-             for i in range(slope_weeks, len(rs))]
-    aligned_rs = rs.iloc[slope_weeks:]
-    states = [_classify(float(r), float(s), slope_eps) for r, s in zip(aligned_rs, slopes)]
-    return pd.DataFrame({"rs": aligned_rs.to_numpy(dtype=float), "slope": slopes,
-                         "state": states}, index=idx)
+      hunt   -- sector in Stage 2 AND Mansfield RS > 0
+                (leadership confirmed, sector tailwind present)
+
+      watch  -- sector in Stage 1 AND Mansfield RS slope > 0
+                (sector basing, money starting to flow in;
+                early stocks may lead the sector's own break to Stage 2)
+
+      avoid  -- everything else
+
+    Deliberately strict. Stage 3/4 sectors are never actionable for
+    long Stage 1->2 stock breakouts, however positive their RS looks
+    (that's just a countertrend bounce). Symmetrically, a Stage 2 sector
+    that lags the market (RS <= 0) is a laggard riding the market up, not
+    a leader worth hunting inside.
+    """
+    if stage == "stage2" and rs > 0:
+        return _STATE_HUNT
+    if stage == "stage1" and rs_slope > rs_slope_eps:
+        return _STATE_WATCH
+    return _STATE_AVOID
+
+
+# ------------------------------------------------------------------
+# HISTORICAL state series (for freshness / weeks_in_state)
+# ------------------------------------------------------------------
+
+def _historical_state_series(weekly_close: pd.Series, rs: pd.Series,
+                             tail_weeks: int,
+                             sma_weeks: int = DEFAULT_SMA_WEEKS,
+                             slope_weeks: int = DEFAULT_SLOPE_WEEKS,
+                             prior_offset_weeks: int = DEFAULT_PRIOR_OFFSET_WEEKS,
+                             flat_slope_pct: float = DEFAULT_FLAT_SLOPE_PCT,
+                             signal_weeks: int = DEFAULT_RS_SIGNAL_WEEKS,
+                             rs_slope_eps: float = DEFAULT_RS_SLOPE_EPS,
+                             ) -> pd.DataFrame:
+    """
+    Per-week (stage, rs, rs_slope, state) history. Uses the SAME rules as
+    the snapshot path -- a sector's label for a given week is identical
+    whether read from a snapshot or from history. Necessary for the
+    `weeks_in_state` freshness metric that the sort depends on.
+
+    Cost: O(tail_weeks) polyfits per sector. For 26 weeks x 11 sectors
+    this is trivial.
+    """
+    idx = rs.index.intersection(weekly_close.index)
+    tail_weeks = min(tail_weeks, len(idx))
+    if tail_weeks <= 0:
+        return pd.DataFrame(columns=["stage", "rs", "rs_slope", "state"])
+
+    dates = idx[-tail_weeks:]
+    rows = []
+    for date in dates:
+        px_to = weekly_close.loc[:date]
+        rs_to = rs.loc[:date]
+        stage = _sector_stage(px_to, sma_weeks, slope_weeks,
+                              prior_offset_weeks, flat_slope_pct)
+        m = _rs_metrics(rs_to, slope_weeks, signal_weeks)
+        if m is None:
+            continue
+        state = _classify(stage, m["rs"], m["rs_slope"], rs_slope_eps)
+        rows.append({
+            "date": date,
+            "stage": stage,
+            "rs": m["rs"],
+            "rs_slope": m["rs_slope"],
+            "state": state,
+        })
+    if not rows:
+        return pd.DataFrame(columns=["stage", "rs", "rs_slope", "state"])
+    return pd.DataFrame(rows).set_index("date")
 
 
 def _weeks_since_change(states: list[str]) -> int | None:
     """
-    Weeks since the last state change in `states` (oldest -> newest), or None
-    if no change was found within the available window -- that ambiguity
-    (very stable vs. simply not enough history in the window) matches
-    rotation_history()'s original inline logic exactly; this is that same
-    logic, extracted so sector_rotation() can share it too.
+    Weeks since the last state change in `states` (oldest -> newest).
+    Returns None when no change is found within the given window --
+    which is genuinely ambiguous between "very stable" and "window too
+    short to observe the last flip". Callers can treat None as "at least
+    len(states) weeks" for sorting/ranking.
     """
     for i in range(len(states) - 1, 0, -1):
         if states[i] != states[i - 1]:
@@ -194,21 +316,54 @@ def _weeks_since_change(states: list[str]) -> int | None:
     return None
 
 
-def sector_rotation(loader, rs_period: int = 52, slope_weeks: int = 5,
-                    signal_weeks: int = 10, start_date: str = "2018-01-01",
-                    slope_eps: float = 0.05,
-                    freshness_lookback_weeks: int = 26) -> list[dict]:
-    """
-    Rank the 11 SPDR sector ETFs by rotation strength vs the S&P 500.
+# ------------------------------------------------------------------
+# PUBLIC API
+# ------------------------------------------------------------------
 
-    Returns a list of dicts (one per sector), sorted so the freshest
-    rotating-in/leading sectors come first. Each dict has:
-      etf, sector, rs, rs_slope, rs_accel, rs_change_4w, crossed_up, state,
-      changed_weeks_ago.
+def sector_rotation(loader, *,
+                    rs_period: int = DEFAULT_RS_PERIOD,
+                    sma_weeks: int = DEFAULT_SMA_WEEKS,
+                    slope_weeks: int = DEFAULT_SLOPE_WEEKS,
+                    prior_offset_weeks: int = DEFAULT_PRIOR_OFFSET_WEEKS,
+                    flat_slope_pct: float = DEFAULT_FLAT_SLOPE_PCT,
+                    signal_weeks: int = DEFAULT_RS_SIGNAL_WEEKS,
+                    rs_slope_eps: float = DEFAULT_RS_SLOPE_EPS,
+                    freshness_lookback_weeks: int = DEFAULT_HISTORY_WEEKS,
+                    trail_weeks: int = 4,
+                    start_date: str = "2018-01-01") -> list[dict]:
     """
-    index_wk = get_weekly_close(loader, _SP500, start_date=start_date)
+    Classify the 11 SPDR sector ETFs as `hunt`, `watch` or `avoid` for
+    Weinstein Stage 1 -> Stage 2 stock breakout scanning.
+
+    Sort order:
+      1. hunt before watch before avoid
+      2. within each state: FRESHEST first (smallest weeks_in_state)
+         -- Weinstein specifically warns against chasing sectors after
+         their leaders are extended; a sector that just entered `hunt`
+         has stock leaders still near their 30W MA.
+      3. tiebreak on RS slope (steeper = stronger momentum).
+
+    Returns a list of dicts, one per sector:
+      {
+        "etf": "XLE", "sector": "Energy",
+        "state": "hunt" | "watch" | "avoid",
+        "sector_stage": "stage1" | "stage2" | "stage3" | "stage4" | "unknown",
+        "rs": 3.20,
+        "rs_slope": 0.150,
+        "rs_crossed_up": True,       # RS just crossed its own signal line
+        "weeks_in_state": 6,         # None if no change seen in the window
+        "trail": [                   # last `trail_weeks` weekly positions
+          {"date": "2026-05-30", "rs": -1.10, "rs_slope": 0.02},
+          ...
+          {"date": "2026-07-18", "rs":  3.20, "rs_slope": 0.15},
+        ],
+      }
+    """
+    benchmark_symbol = benchmark_for("US")
+    index_wk = get_weekly_close(loader, benchmark_symbol, start_date=start_date)
     if index_wk is None:
-        log.error("Could not load S&P 500 (%s) for rotation.", _SP500)
+        log.error("Could not load benchmark %s for sector rotation.",
+                  benchmark_symbol)
         return []
 
     rows: list[dict] = []
@@ -218,65 +373,104 @@ def sector_rotation(loader, rs_period: int = 52, slope_weeks: int = 5,
             log.warning("No data for sector ETF %s (%s); skipping.", etf, sector)
             continue
 
+        stage = _sector_stage(stock_wk, sma_weeks, slope_weeks,
+                              prior_offset_weeks, flat_slope_pct)
+
         rs = mansfield_rs(stock_wk, index_wk, n=rs_period).dropna()
         m = _rs_metrics(rs, slope_weeks, signal_weeks)
         if m is None:
+            log.warning("Not enough RS history for %s; skipping.", etf)
             continue
 
-        state = _classify(m["rs"], m["rs_slope"], slope_eps)
-        hist = _rolling_rs_series(rs, slope_weeks, slope_eps,
-                                  tail_weeks=freshness_lookback_weeks)
-        changed_weeks_ago = _weeks_since_change(hist["state"].tolist()) if not hist.empty else None
+        state = _classify(stage, m["rs"], m["rs_slope"], rs_slope_eps)
 
-        m.update({
-            "etf": etf, "sector": sector, "state": state,
-            "changed_weeks_ago": changed_weeks_ago,
+        # Freshness: how many weeks the current state has held.
+        hist = _historical_state_series(
+            stock_wk, rs, freshness_lookback_weeks,
+            sma_weeks=sma_weeks, slope_weeks=slope_weeks,
+            prior_offset_weeks=prior_offset_weeks,
+            flat_slope_pct=flat_slope_pct,
+            signal_weeks=signal_weeks, rs_slope_eps=rs_slope_eps)
+        weeks_in_state = (_weeks_since_change(hist["state"].tolist())
+                          if not hist.empty else None)
+
+        # Trail for the money-flow plot: last `trail_weeks` positions in
+        # (RS, RS-slope) space. Reuses the historical series computed for
+        # weeks_in_state, so no extra data fetch. Bounded above by
+        # freshness_lookback_weeks (`hist` never has more than that many
+        # rows) -- if you crank trail_weeks past freshness_lookback_weeks
+        # you'll silently get the shorter of the two.
+        trail: list[dict] = []
+        if not hist.empty:
+            for tdate, trow in hist.tail(trail_weeks).iterrows():
+                trail.append({
+                    "date": tdate.strftime("%Y-%m-%d"),
+                    "rs": round(float(trow["rs"]), 2),
+                    "rs_slope": round(float(trow["rs_slope"]), 3),
+                })
+
+        rows.append({
+            "etf": etf,
+            "sector": sector,
+            "state": state,
+            "sector_stage": stage,
+            "rs": m["rs"],
+            "rs_slope": m["rs_slope"],
+            "rs_crossed_up": m["rs_crossed_up"],
+            "weeks_in_state": weeks_in_state,
+            "trail": trail,
         })
-        rows.append(m)
 
-    # Sort: rotating-in first (the early opportunity), then leaders, then the
-    # rest. Within a state, FRESHEST first (a sector that just flipped is a
-    # stronger signal than one that's been there for months), then steeper
-    # slope as a tiebreak. Mirrors rotation_history()'s own sort below, so the
-    # two views agree on what "most interesting" means.
-    state_rank = {"Rotating In": 0, "Leading": 1, "Neutral": 2,
-                  "Weakening": 3, "Lagging": 4}
+    state_rank = {_STATE_HUNT: 0, _STATE_WATCH: 1, _STATE_AVOID: 2}
     rows.sort(key=lambda r: (
         state_rank.get(r["state"], 9),
-        r["changed_weeks_ago"] if r["changed_weeks_ago"] is not None else 999,
-        -r["rs_slope"], -r["rs"],
+        # freshest first (None = unknown = treat as stale)
+        r["weeks_in_state"] if r["weeks_in_state"] is not None else 999,
+        # steeper RS slope wins tiebreak
+        -r["rs_slope"],
     ))
     return rows
 
 
-def rotation_history(loader, weeks: int = 26, rs_period: int = 52,
-                     slope_weeks: int = 5, slope_eps: float = 0.05,
+def rotation_history(loader, *,
+                     weeks: int = DEFAULT_HISTORY_WEEKS,
+                     rs_period: int = DEFAULT_RS_PERIOD,
+                     sma_weeks: int = DEFAULT_SMA_WEEKS,
+                     slope_weeks: int = DEFAULT_SLOPE_WEEKS,
+                     prior_offset_weeks: int = DEFAULT_PRIOR_OFFSET_WEEKS,
+                     flat_slope_pct: float = DEFAULT_FLAT_SLOPE_PCT,
+                     signal_weeks: int = DEFAULT_RS_SIGNAL_WEEKS,
+                     rs_slope_eps: float = DEFAULT_RS_SLOPE_EPS,
                      start_date: str = "2018-01-01") -> dict:
     """
-    Rotation state of every sector over the LAST `weeks` weeks.
+    hunt/watch/avoid state of every sector over the last `weeks` weeks.
 
-    The single-snapshot view tells you where money is today; this tells you WHEN
-    each sector changed state. Seeing "Energy flipped to Rotating In six weeks
-    ago and has stayed there" is far more actionable than today's label alone —
-    it shows whether a rotation is fresh (still early, leaders near their MA) or
-    long in the tooth.
+    Same rules as `sector_rotation`, so today's snapshot and today's cell
+    in the history table are always identical. Useful for spotting WHEN a
+    sector became actionable -- a sector that just flipped to `hunt` is
+    a fresh opportunity; one that has been `hunt` for six months means
+    its leaders are likely already extended.
 
     Returns:
       {
-        "dates":   ["2026-02-06", ...],                 # oldest -> newest
+        "dates":   ["2026-02-06", ..., "2026-07-17"],   # oldest -> newest
         "sectors": [
-           {"etf": "XLE", "sector": "Energy",
-            "rs":     [ ... one per date ... ],
-            "slope":  [ ... ],
-            "states": ["Lagging", ..., "Rotating In"],
-            "changed_weeks_ago": 6 or None},            # weeks since last flip
-           ...
+          {"etf": "XLE", "sector": "Energy",
+           "states":   ["avoid", ..., "hunt"],
+           "stages":   ["stage4", ..., "stage2"],
+           "current_state": "hunt",
+           "current_stage": "stage2",
+           "weeks_in_state": 6,
+           "dates":  [...],
+          },
+          ...
         ]
       }
     """
-    index_wk = get_weekly_close(loader, _SP500, start_date=start_date)
+    benchmark_symbol = benchmark_for("US")
+    index_wk = get_weekly_close(loader, benchmark_symbol, start_date=start_date)
     if index_wk is None:
-        log.error("Could not load S&P 500 for rotation history.")
+        log.error("Could not load benchmark for rotation history.")
         return {"dates": [], "sectors": []}
 
     dates: list[str] | None = None
@@ -288,12 +482,17 @@ def rotation_history(loader, weeks: int = 26, rs_period: int = 52,
             continue
 
         rs = mansfield_rs(stock_wk, index_wk, n=rs_period).dropna()
-        hist = _rolling_rs_series(rs, slope_weeks, slope_eps, tail_weeks=weeks)
+        hist = _historical_state_series(
+            stock_wk, rs, weeks,
+            sma_weeks=sma_weeks, slope_weeks=slope_weeks,
+            prior_offset_weeks=prior_offset_weeks,
+            flat_slope_pct=flat_slope_pct,
+            signal_weeks=signal_weeks, rs_slope_eps=rs_slope_eps)
         if hist.empty:
             continue
 
         states = hist["state"].tolist()
-        changed_weeks_ago = _weeks_since_change(states)
+        stages = hist["stage"].tolist()
         these_dates = [d.strftime("%Y-%m-%d") for d in hist.index]
         if dates is None:
             dates = these_dates
@@ -301,46 +500,17 @@ def rotation_history(loader, weeks: int = 26, rs_period: int = 52,
         out.append({
             "etf": etf,
             "sector": sector,
-            "rs": [round(float(v), 2) for v in hist["rs"]],
-            "slope": [round(float(v), 3) for v in hist["slope"]],
             "states": states,
+            "stages": stages,
             "current_state": states[-1],
-            "changed_weeks_ago": changed_weeks_ago,
+            "current_stage": stages[-1],
+            "weeks_in_state": _weeks_since_change(states),
             "dates": these_dates,
         })
 
-    # Freshest rotations first: a sector that JUST flipped to Rotating In is the
-    # highest-value signal for an early breakout hunter.
-    state_rank = {"Rotating In": 0, "Leading": 1, "Neutral": 2,
-                  "Weakening": 3, "Lagging": 4}
-    out.sort(key=lambda r: (state_rank.get(r["current_state"], 9),
-                            r["changed_weeks_ago"] if r["changed_weeks_ago"] is not None else 999))
-
+    state_rank = {_STATE_HUNT: 0, _STATE_WATCH: 1, _STATE_AVOID: 2}
+    out.sort(key=lambda r: (
+        state_rank.get(r["current_state"], 9),
+        r["weeks_in_state"] if r["weeks_in_state"] is not None else 999,
+    ))
     return {"dates": dates or [], "sectors": out}
-
-
-def industry_rotation(finviz, sector_name: str, top_n: int = 0,
-                      col_target: str = "Perf Quart") -> list[dict]:
-    """
-    Within a sector that is rotating in, find the strongest INDUSTRIES using
-    Finviz group performance. This narrows the hunt to the specific corner of
-    the sector leading the move.
-
-    top_n = 0 (default) returns ALL industries, ranked strongest first.
-    `col_target` is the Finviz performance column to rank by.
-
-    NOTE (unchanged by this pass, flagged for a future one): sector_name is
-    currently unused below -- finviz.get_top_industries() has no sector filter
-    applied, so this returns the same market-wide ranking regardless of which
-    sector you ask about. See market_us.py::collect_us_by_rotation()'s
-    docstring for why the new rotation-driven scanning path deliberately
-    doesn't depend on this function yet.
-    """
-    try:
-        # A large cap effectively means "all" (Finviz has ~150 industries).
-        limit = top_n if top_n and top_n > 0 else 500
-        industries = finviz.get_top_industries(top_n=limit, col_target=col_target)
-    except Exception as e:  # noqa: BLE001
-        log.error("Finviz industry rotation failed: %s", e)
-        return []
-    return [{"industry": name, "rank": i + 1} for i, name in enumerate(industries)]

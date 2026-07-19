@@ -14,6 +14,7 @@
     --accent: #2f81f7;
     --accent-dim: #1f6feb33;
     --ok: #3fb950;
+    --warn: #d29922;
     --field: #0d1117;
     --radius: 6px;
   }
@@ -124,18 +125,33 @@
   .tbl { width:100%; border-collapse:collapse; font-size:14px; }
   .tbl th, .tbl td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
   .tbl th { color:var(--muted); font-weight:600; }
-  .rot-row { cursor:pointer; }
-  .rot-row:hover { background:var(--field); }
   .badge { padding:2px 8px; border-radius:6px; font-size:12px; font-weight:700; }
-  .st-in   { background:#052e1a; color:#4ade80; }
-  .st-lead { background:#0b2a4a; color:#60a5fa; }
-  .st-neu  { background:#1c222b; color:#9aa4b2; }
-  .st-weak { background:#3a2a06; color:#fbbf24; }
-  .st-lag  { background:#3a0a0a; color:#f87171; }
+
+  /* State badge colors -- must match RRG plot palette below. */
+  .st-hunt  { background:#052e1a; color:#4ade80; }
+  .st-watch { background:#0b2a4a; color:#60a5fa; }
+  .st-avoid { background:#1c222b; color:#9aa4b2; }
+  .stage-badge { background:var(--field); color:var(--muted); }
+
   .timeline { display:flex; gap:2px; flex-wrap:nowrap; }
   .cell { display:inline-block; min-width:22px; text-align:center; padding:2px 0;
           border-radius:3px; font-size:10px; font-weight:700; font-family:ui-monospace,monospace; }
   .scroll { overflow-x:auto; }
+
+  /* Money-flow (RRG) plot container: capped small so it stays interpretable. */
+  #rrg-plot { display:flex; justify-content:center;
+              background:#161b22; border:1px solid var(--line);
+              border-radius:var(--radius); padding:6px; }
+  #rrg-plot svg { max-width:520px; width:100%; height:auto; }
+  /* Grouped ETF list below the plot: the unambiguous "which are which". */
+  .rrg-groups { margin-top:10px; display:flex; flex-direction:column; gap:6px;
+                font-size:12.5px; }
+  .rrg-groups .row { display:flex; align-items:baseline; gap:10px; }
+  .rrg-groups .row .badge { flex-shrink:0; }
+  .rrg-groups .etfs { color:var(--ink); font-family:ui-monospace,Menlo,Consolas,monospace;
+                      font-size:12px; }
+  .rrg-groups .etfs .muted { color:var(--muted); }
+  .rrg-groups .empty { color:var(--muted); font-style:italic; }
 </style>
 </head>
 <body>
@@ -152,30 +168,55 @@
 
   <div id="view-monitor" class="hidden">
     <div class="panel">
-      <div class="legend">Sector rotation — follow the money</div>
+      <div class="legend">Sector selection for Weinstein Stage 1→2 breakouts</div>
       <div class="desc">
-        SPDR sector ETFs ranked by Mansfield RS vs the S&amp;P 500, plus RS slope.
-        <b>Rotating In</b> = money starting to flow in before the sector leads (watch these for breakouts, leaders still near their MA).
-        <b>Leading</b> = already strong (often late). <b>Weakening</b> = rotating out.
+        Each SPDR sector ETF is checked on <b>two</b> Weinstein criteria:
+        (1) its own stage on the weekly chart (30W MA + prior trend), and
+        (2) Mansfield RS vs SPY.
+        <br><br>
+        <span class="badge st-hunt">hunt</span>
+        &nbsp;sector in Stage 2 <em>and</em> RS &gt; 0 — leadership confirmed,
+        tailwind in place. Hunt Stage 1→2 stock breakouts here.
+        <br>
+        <span class="badge st-watch">watch</span>
+        &nbsp;sector in Stage 1 <em>and</em> RS turning up — early rotation, not
+        yet actionable but component leaders may lead the sector out.
+        <br>
+        <span class="badge st-avoid">avoid</span>
+        &nbsp;Stage 3, Stage 4, or no RS momentum. Countertrend risk.
       </div>
       <button id="load-rotation" class="run">Scan sector rotation</button>
       <div id="monitor-status" class="muted" style="margin-top:10px"></div>
-      <div id="rotation-wrap" class="hidden" style="margin-top:14px">
+
+      <div id="rrg-wrap" class="hidden" style="margin-top:18px">
+        <div class="legend">Money-flow plot — where each sector is going</div>
+        <div class="desc" style="margin-bottom:10px">
+          Each circle is a sector's current (RS, RS slope); the fading tail is
+          the last 8 weeks. <b>Position</b> is RS vs slope only —
+          <b>color</b> is the Weinstein state, which also uses the sector's
+          own stage (not on the plot). So a circle in the "leading" corner
+          can still be <em>avoid</em> if the sector itself is topping.
+          The list under the plot spells out which is which.
+        </div>
+        <div id="rrg-plot"></div>
+        <div id="rrg-groups" class="rrg-groups"></div>
+      </div>
+
+      <div id="rotation-wrap" class="hidden" style="margin-top:22px">
+        <div class="legend">Ranked sectors</div>
         <table id="rotation-table" class="tbl"></table>
       </div>
+
       <div id="history-wrap" class="hidden" style="margin-top:22px">
-        <div class="legend">Rotation history — when did each sector change?</div>
+        <div class="legend">State history — when did each sector change?</div>
         <div class="desc">
-          State week by week (oldest → newest). <b>IN</b>=Rotating In, <b>LD</b>=Leading,
-          <b>WK</b>=Weakening, <b>LG</b>=Lagging, <b>··</b>=Neutral. A sector that flipped
-          to <b>IN</b> recently is a <i>fresh</i> rotation — its leaders are likely still
-          near the MA30, so your breakouts are still entrable. Hover a cell for the date.
+          State week by week (oldest → newest). <b>HN</b>=hunt,
+          <b>WT</b>=watch, <b>AV</b>=avoid. A sector that flipped to <b>HN</b>
+          recently is a <i>fresh</i> hunting ground — its leaders are likely
+          still near the 30W MA, so breakouts are still entrable. Hover a cell
+          for the date.
         </div>
         <div class="scroll"><table id="history-table" class="tbl"></table></div>
-      </div>
-      <div id="industry-wrap" class="hidden" style="margin-top:16px">
-        <div class="legend" id="industry-title">Industries</div>
-        <div class="scroll"><table id="industry-table" class="tbl"></table></div>
       </div>
     </div>
   </div>
@@ -205,7 +246,7 @@
         <select id="us_source">
           <option value="industries">Industries (≈150 fine groups)</option>
           <option value="sectors">Sectors (≈11 broad groups)</option>
-          <option value="rotation">Rotation (money-flow driven)</option>
+          <option value="rotation">Rotation (Weinstein-selected sectors)</option>
           <option value="ticker">Ticker (check specific stocks)</option>
         </select>
       </div>
@@ -265,11 +306,11 @@ const $ = (id) => document.getElementById(id);
 let SCHEMA = null;
 let mode = "us";
 
+// ---------- Screener boot ----------
 async function boot() {
   const res = await fetch("/api/strategies");
   SCHEMA = await res.json();
 
-  // Tab switching
   $("tab-screen").addEventListener("click", () => switchTab("screen"));
   $("tab-monitor").addEventListener("click", () => switchTab("monitor"));
   $("load-rotation").addEventListener("click", loadRotation);
@@ -427,7 +468,6 @@ function renderResults(data) {
   const charts = data.charts || {};
   $("count").textContent = data.count;
 
-  // Build the table only when there are matched rows.
   if (data.count) {
     let html = "<thead><tr>" + data.columns.map(c => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
     html += data.rows.map(r =>
@@ -439,8 +479,6 @@ function renderResults(data) {
     table.innerHTML = "";
   }
 
-  // Charts: from matched rows AND any diagnostic charts (ticker mode returns
-  // charts even with zero matches).
   gallery.innerHTML = "";
   const shown = new Set();
   const addCard = (ticker, url) => {
@@ -456,15 +494,10 @@ function renderResults(data) {
   if (data.count && tickerIdx !== -1) {
     data.rows.forEach(r => addCard(r[tickerIdx], charts[r[tickerIdx]]));
   }
-  // Any remaining charts (diagnostic tickers that didn't match).
   Object.entries(charts).forEach(([ticker, url]) => addCard(ticker, url));
 
-  // Show the panel if there's anything to show (rows or charts).
-  if (data.count || Object.keys(charts).length) {
-    box.classList.remove("hidden");
-  } else {
-    box.classList.add("hidden");
-  }
+  if (data.count || Object.keys(charts).length) box.classList.remove("hidden");
+  else box.classList.add("hidden");
 }
 
 function switchTab(which) {
@@ -475,23 +508,29 @@ function switchTab(which) {
   $("view-monitor").classList.toggle("hidden", screen);
 }
 
-const STATE_CLASS = {
-  "Rotating In": "st-in", "Leading": "st-lead", "Neutral": "st-neu",
-  "Weakening": "st-weak", "Lagging": "st-lag"
-};
+// ---------- Market monitor: state color / label maps ----------
+
+const STATE_CLASS = { hunt: "st-hunt", watch: "st-watch", avoid: "st-avoid" };
+const STATE_ABBR  = { hunt: "HN",       watch: "WT",       avoid: "AV" };
+// Palette must match the CSS badges above so plot / table / timeline agree.
+const STATE_COLOR = { hunt: "#3fb950", watch: "#2f81f7", avoid: "#6e7681" };
 
 async function loadRotation() {
   const btn = $("load-rotation");
   const status = $("monitor-status");
   btn.disabled = true;
-  status.textContent = "Scanning sector ETFs vs S&P 500… (downloading weekly data)";
+  status.textContent = "Scanning sector ETFs vs SPY… (downloading weekly data)";
   try {
     const res = await fetch("/api/rotation");
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    renderRotation(data.sectors || []);
-    renderHistory(data.history || {dates: [], sectors: []});
-    status.textContent = `Done — ${(data.sectors || []).length} sectors ranked. Click a sector to see its industries.`;
+    const sectors = data.sectors || [];
+    renderRRG(sectors);
+    renderRotation(sectors);
+    renderHistory(data.history || { dates: [], sectors: [] });
+    const hunts = sectors.filter(s => s.state === "hunt").length;
+    const watches = sectors.filter(s => s.state === "watch").length;
+    status.textContent = `Done — ${hunts} hunt, ${watches} watch, ${sectors.length - hunts - watches} avoid.`;
   } catch (e) {
     status.textContent = "Error: " + e.message;
   } finally {
@@ -499,10 +538,180 @@ async function loadRotation() {
   }
 }
 
-const STATE_ABBR = {
-  "Rotating In": "IN", "Leading": "LD", "Neutral": "··",
-  "Weakening": "WK", "Lagging": "LG"
-};
+// ---------- Money-flow plot (RRG-style, pure SVG) ----------
+//
+// Circle = sector at current (RS, RS slope). Trail = last 8 weekly positions,
+// oldest -> newest, fading in opacity / thickness so the current point pops.
+// Symmetric zero-centered axes so the four quadrants read naturally.
+
+function renderRRG(sectors) {
+  const wrap = $("rrg-wrap");
+  const host = $("rrg-plot");
+  if (!sectors.length) { wrap.classList.add("hidden"); return; }
+
+  const W = 520, H = 380;
+  const pad = { top: 24, right: 24, bottom: 40, left: 50 };
+  const iw = W - pad.left - pad.right;
+  const ih = H - pad.top - pad.bottom;
+
+  // Auto-scale symmetric around zero, using both current AND trail points so
+  // trails don't spill outside the plot area.
+  const pts = [];
+  sectors.forEach(s => {
+    pts.push([s.rs, s.rs_slope]);
+    (s.trail || []).forEach(p => pts.push([p.rs, p.rs_slope]));
+  });
+  const rsMax    = Math.max(0.5, ...pts.map(p => Math.abs(p[0]))) * 1.15;
+  const slopeMax = Math.max(0.1, ...pts.map(p => Math.abs(p[1]))) * 1.15;
+
+  const X = v => pad.left + ((v + rsMax) / (2 * rsMax)) * iw;
+  const Y = v => pad.top + (1 - (v + slopeMax) / (2 * slopeMax)) * ih;
+  const x0 = X(0), y0 = Y(0);
+
+  const parts = [
+    `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sector money-flow plot">`,
+    // Plot area
+    `<rect x="${pad.left}" y="${pad.top}" width="${iw}" height="${ih}" fill="#0d1117" stroke="#232a33"/>`,
+    // Zero-axis crosshair (splits into four Weinstein quadrants)
+    `<line x1="${x0}" y1="${pad.top}" x2="${x0}" y2="${pad.top+ih}" stroke="#4a5560" stroke-dasharray="4,3"/>`,
+    `<line x1="${pad.left}" y1="${y0}" x2="${pad.left+iw}" y2="${y0}" stroke="#4a5560" stroke-dasharray="4,3"/>`,
+    // Quadrant labels
+    qLabel(pad.left + iw - 6, pad.top + 12, "end",   "leading ↗"),
+    qLabel(pad.left + 6,      pad.top + 12, "start", "↖ improving"),
+    qLabel(pad.left + 6,      pad.top + ih - 6, "start", "↙ lagging"),
+    qLabel(pad.left + iw - 6, pad.top + ih - 6, "end",   "weakening ↘"),
+    // Axis titles
+    `<text x="${pad.left+iw/2}" y="${H-10}" fill="#8b949e" font-size="11" text-anchor="middle">Mansfield RS →</text>`,
+    `<text x="14" y="${pad.top+ih/2}" fill="#8b949e" font-size="11" text-anchor="middle" transform="rotate(-90 14 ${pad.top+ih/2})">RS slope →</text>`,
+  ];
+
+  // Per-state visual weight. Hunt / watch get a halo so the actionable
+  // sectors pop out of the "avoid" background at a glance; avoid is muted
+  // so it recedes without disappearing (freshness / drift still readable).
+  const styleFor = (state) => {
+    if (state === "hunt")  return { r: 7,   halo: 13, haloAlpha: 0.28,
+                                     circleAlpha: 1.0, labelAlpha: 1.0, labelWeight: 700 };
+    if (state === "watch") return { r: 6,   halo: 10, haloAlpha: 0.22,
+                                     circleAlpha: 1.0, labelAlpha: 1.0, labelWeight: 700 };
+    return                        { r: 4.5, halo: 0,  haloAlpha: 0,
+                                     circleAlpha: 0.65, labelAlpha: 0.7, labelWeight: 500 };
+  };
+
+  // Draw in reverse state priority so hunt sits on top of watch sits on top
+  // of avoid.
+  const order = { avoid: 0, watch: 1, hunt: 2 };
+  const drawOrder = [...sectors].sort((a, b) =>
+    (order[a.state] ?? 0) - (order[b.state] ?? 0));
+
+  drawOrder.forEach(s => {
+    const color = STATE_COLOR[s.state] || "#6e7681";
+    const st = styleFor(s.state);
+    const trail = s.trail || [];
+
+    // Trail: opacity + width taper toward the current position. Avoid trails
+    // are dimmed further so they don't crowd the actionable sectors.
+    const trailBase = s.state === "avoid" ? 0.5 : 1.0;
+    for (let i = 1; i < trail.length; i++) {
+      const t = trail.length > 1 ? i / (trail.length - 1) : 1;
+      const opacity = ((0.12 + 0.55 * t) * trailBase).toFixed(2);
+      const width   = (0.9 + 0.7 * t).toFixed(2);
+      parts.push(
+        `<line x1="${X(trail[i-1].rs)}" y1="${Y(trail[i-1].rs_slope)}" `
+      + `x2="${X(trail[i].rs)}" y2="${Y(trail[i].rs_slope)}" `
+      + `stroke="${color}" stroke-width="${width}" opacity="${opacity}" `
+      + `stroke-linecap="round"/>`
+      );
+    }
+    trail.forEach((p, i) => {
+      const t = trail.length > 1 ? i / (trail.length - 1) : 1;
+      const opacity = ((0.15 + 0.45 * t) * trailBase).toFixed(2);
+      parts.push(`<circle cx="${X(p.rs)}" cy="${Y(p.rs_slope)}" r="1.3" fill="${color}" opacity="${opacity}"/>`);
+    });
+
+    // Current position: halo (only for hunt/watch) + main circle + label.
+    const cx = X(s.rs), cy = Y(s.rs_slope);
+    const wksTxt = (s.weeks_in_state === null || s.weeks_in_state === undefined)
+                    ? "—" : `${s.weeks_in_state}w`;
+    const tip = `${s.sector} (${s.etf})\n`
+              + `state: ${s.state}    stage: ${s.sector_stage}\n`
+              + `RS ${s.rs.toFixed(2)}    slope ${s.rs_slope.toFixed(3)}\n`
+              + `in state: ${wksTxt}`;
+    if (st.halo > 0) {
+      parts.push(`<circle cx="${cx}" cy="${cy}" r="${st.halo}" fill="${color}" opacity="${st.haloAlpha}"/>`);
+    }
+    parts.push(
+      `<circle cx="${cx}" cy="${cy}" r="${st.r}" fill="${color}" `
+    + `stroke="#0e1116" stroke-width="1.4" opacity="${st.circleAlpha}">`
+    + `<title>${tip}</title></circle>`
+    );
+    parts.push(
+      `<text x="${cx + st.r + 3}" y="${cy + 3}" fill="${color}" font-size="10" `
+    + `font-weight="${st.labelWeight}" opacity="${st.labelAlpha}" `
+    + `font-family="ui-monospace,monospace" pointer-events="none">${s.etf}</text>`
+    );
+  });
+
+  parts.push(`</svg>`);
+  host.innerHTML = parts.join("");
+
+  // Grouped ETF list below the plot -- the "which is which" lookup.
+  const groups = { hunt: [], watch: [], avoid: [] };
+  sectors.forEach(s => {
+    if (groups[s.state]) groups[s.state].push(s);
+  });
+  const groupsHost = $("rrg-groups");
+  const rowHTML = (state, label) => {
+    const items = groups[state] || [];
+    const cls = STATE_CLASS[state];
+    const list = items.length
+      ? items.map(s => `<span title="${s.sector} — stage ${s.sector_stage}">${s.etf}<span class="muted"> ${s.sector}</span></span>`)
+             .join(' <span class="muted">·</span> ')
+      : `<span class="empty">none</span>`;
+    return `<div class="row">`
+         + `<span class="badge ${cls}">${label} (${items.length})</span>`
+         + `<span class="etfs">${list}</span></div>`;
+  };
+  groupsHost.innerHTML = rowHTML("hunt", "hunt") + rowHTML("watch", "watch") + rowHTML("avoid", "avoid");
+
+  wrap.classList.remove("hidden");
+}
+
+function qLabel(x, y, anchor, txt) {
+  return `<text x="${x}" y="${y}" fill="#5d6773" font-size="9.5" text-anchor="${anchor}" font-family="ui-monospace,monospace">${txt}</text>`;
+}
+
+// ---------- Ranked-sector table ----------
+
+function renderRotation(sectors) {
+  const wrap = $("rotation-wrap");
+  const t = $("rotation-table");
+  if (!sectors.length) { wrap.classList.add("hidden"); return; }
+
+  let html = "<thead><tr>"
+           + "<th>Sector</th><th>ETF</th><th>State</th><th>Stage</th>"
+           + "<th>RS</th><th>RS slope</th><th>Fresh cross</th><th>Weeks in state</th>"
+           + "</tr></thead><tbody>";
+  html += sectors.map(s => {
+    const stCls = STATE_CLASS[s.state] || "";
+    const wks = (s.weeks_in_state === null || s.weeks_in_state === undefined)
+                  ? '<span class="muted">—</span>' : `${s.weeks_in_state}w`;
+    return `<tr>`
+      + `<td>${s.sector}</td>`
+      + `<td class="muted">${s.etf}</td>`
+      + `<td><span class="badge ${stCls}">${s.state}</span></td>`
+      + `<td><span class="badge stage-badge">${s.sector_stage}</span></td>`
+      + `<td>${s.rs}</td>`
+      + `<td>${s.rs_slope}</td>`
+      + `<td>${s.rs_crossed_up ? "✓" : ""}</td>`
+      + `<td>${wks}</td>`
+      + `</tr>`;
+  }).join("");
+  html += "</tbody>";
+  t.innerHTML = html;
+  wrap.classList.remove("hidden");
+}
+
+// ---------- State-history timeline ----------
 
 function renderHistory(hist) {
   const wrap = $("history-wrap");
@@ -510,15 +719,13 @@ function renderHistory(hist) {
   const sectors = hist.sectors || [];
   if (!sectors.length) { wrap.classList.add("hidden"); return; }
 
-  // Column headers: show every 4th date to keep it readable.
-  const dates = sectors[0].dates || hist.dates || [];
-  let html = "<thead><tr><th>Sector</th><th>Now</th><th>Changed</th><th>State over time (oldest → newest)</th></tr></thead><tbody>";
+  let html = "<thead><tr><th>Sector</th><th>Now</th><th>Changed</th>"
+           + "<th>State over time (oldest → newest)</th></tr></thead><tbody>";
   html += sectors.map(s => {
     const cls = STATE_CLASS[s.current_state] || "";
-    const changed = (s.changed_weeks_ago === null || s.changed_weeks_ago === undefined)
-      ? '<span class="muted">no change</span>'
-      : `${s.changed_weeks_ago}w ago`;
-    const cells = s.states.map((st, i) => {
+    const changed = (s.weeks_in_state === null || s.weeks_in_state === undefined)
+      ? '<span class="muted">no change</span>' : `${s.weeks_in_state}w ago`;
+    const cells = (s.states || []).map((st, i) => {
       const c = STATE_CLASS[st] || "";
       const d = (s.dates && s.dates[i]) ? s.dates[i] : "";
       return `<span class="cell ${c}" title="${d}: ${st}">${STATE_ABBR[st] || "?"}</span>`;
@@ -531,51 +738,6 @@ function renderHistory(hist) {
   html += "</tbody>";
   t.innerHTML = html;
   wrap.classList.remove("hidden");
-}
-
-function renderRotation(sectors) {
-  const wrap = $("rotation-wrap");
-  const t = $("rotation-table");
-  if (!sectors.length) { wrap.classList.add("hidden"); return; }
-  let html = "<thead><tr><th>Sector</th><th>ETF</th><th>State</th>"
-           + "<th>RS</th><th>RS slope</th><th>Δ4w</th><th>Cross↑</th></tr></thead><tbody>";
-  html += sectors.map(s => {
-    const cls = STATE_CLASS[s.state] || "";
-    return `<tr class="rot-row" data-sector="${s.sector}">`
-      + `<td>${s.sector}</td><td class="muted">${s.etf}</td>`
-      + `<td><span class="badge ${cls}">${s.state}</span></td>`
-      + `<td>${s.rs}</td><td>${s.rs_slope}</td>`
-      + `<td>${s.rs_change_4w ?? "—"}</td>`
-      + `<td>${s.crossed_up ? "✓" : ""}</td></tr>`;
-  }).join("");
-  html += "</tbody>";
-  t.innerHTML = html;
-  wrap.classList.remove("hidden");
-
-  // Click a sector -> load its industries
-  t.querySelectorAll(".rot-row").forEach(row => {
-    row.addEventListener("click", () => loadIndustries(row.dataset.sector));
-  });
-}
-
-async function loadIndustries(sector) {
-  const wrap = $("industry-wrap");
-  const title = $("industry-title");
-  const t = $("industry-table");
-  title.textContent = `Industries ranked by strength — ${sector}`;
-  t.innerHTML = "<tbody><tr><td class='muted'>Loading…</td></tr></tbody>";
-  wrap.classList.remove("hidden");
-  try {
-    const res = await fetch("/api/rotation?sector=" + encodeURIComponent(sector));
-    const data = await res.json();
-    const inds = data.industries || [];
-    if (!inds.length) { t.innerHTML = "<tbody><tr><td class='muted'>No industry data.</td></tr></tbody>"; return; }
-    t.innerHTML = "<thead><tr><th>#</th><th>Industry</th></tr></thead><tbody>"
-      + inds.map(i => `<tr><td class="muted">${i.rank}</td><td>${i.industry}</td></tr>`).join("")
-      + "</tbody>";
-  } catch (e) {
-    t.innerHTML = `<tbody><tr><td class='muted'>Error: ${e.message}</td></tr></tbody>`;
-  }
 }
 
 boot();

@@ -8,6 +8,7 @@ Endpoints:
   GET  /                -> the single-page UI
   GET  /api/strategies  -> registered strategies + their param schemas
   POST /api/run         -> build a RunConfig, call run(cfg), return results JSON
+  GET  /api/rotation    -> Weinstein sector-selection monitor
 
 The UI renders parameter fields dynamically from each strategy's declared
 schema, so a newly added strategy gets correct form fields with no frontend
@@ -113,8 +114,8 @@ def run_endpoint():
         return jsonify({"error": "market.mode must be 'us' or 'international'"}), 400
 
     us_source = (market.get("us_source") or "industries").lower()
-    if us_source not in ("industries", "sectors", "ticker"):
-        return jsonify({"error": "us_source must be 'industries', 'sectors' or 'ticker'"}), 400
+    if us_source not in ("industries", "sectors", "rotation", "ticker"):
+        return jsonify({"error": "us_source must be 'industries', 'sectors', 'rotation' or 'ticker'"}), 400
 
     # Parse comma-separated tickers if in ticker mode.
     raw_tickers = market.get("tickers", "")
@@ -194,13 +195,13 @@ def charts(filename):
 @app.get("/api/rotation")
 def rotation_endpoint():
     """
-    Sector-rotation monitor. Ranks the 11 SPDR sector ETFs by Mansfield RS vs
-    the S&P 500, plus RS slope and rotation state, so the user can spot money
-    flowing INTO a sector before its leaders are extended. Optional ?sector=
-    also returns the strongest Finviz industries (for drilling down).
+    Weinstein sector-selection monitor. Classifies the 11 SPDR sector ETFs
+    as hunt / watch / avoid using sector stage (own weekly chart) plus
+    Mansfield RS vs SPY. The frontend uses this both for the money-flow
+    plot and for driving `us_source=rotation` scans.
     """
     from src.data_loader import DataLoader
-    from src.rotation import sector_rotation, industry_rotation, rotation_history
+    from src.rotation import sector_rotation, rotation_history
 
     loader = DataLoader()
     try:
@@ -211,8 +212,8 @@ def rotation_endpoint():
 
     payload = {"sectors": sectors}
 
-    # Rotation history: how each sector's state evolved over recent weeks, so
-    # the user can see WHEN a rotation started (fresh = still early).
+    # Rotation history: how each sector's state evolved over recent weeks,
+    # so the user can see WHEN a rotation started (fresh = still early).
     if request.args.get("history", "1") != "0":
         try:
             weeks = int(request.args.get("weeks", 26))
@@ -223,16 +224,6 @@ def rotation_endpoint():
         except Exception as e:  # noqa: BLE001
             log.warning("Rotation history failed: %s", e)
             payload["history"] = {"dates": [], "sectors": []}
-
-    sector_q = request.args.get("sector", "").strip()
-    if sector_q:
-        try:
-            from src.finviz_engine import FinvizEngine
-            payload["industries"] = industry_rotation(FinvizEngine(), sector_q)
-            payload["industries_for"] = sector_q
-        except Exception as e:  # noqa: BLE001
-            log.warning("Industry rotation failed: %s", e)
-            payload["industries"] = []
 
     return jsonify(payload)
 

@@ -3,14 +3,26 @@ benchmarks.py
 -------------
 Market benchmarks, regime detection and Mansfield relative strength.
 
-Mansfield RS is the Weinstein-school measure of whether a stock (or sector ETF)
-is outperforming its market index:
+Mansfield RS is the Weinstein-school measure of whether a stock (or sector
+ETF) is outperforming its market index:
 
     RP  = (stock / index) * 100
     MRS = ((RP / SMA(RP, n)) - 1) * 100
 
-MRS > 0 means the stock is stronger than the index relative to its own recent
-norm; MRS < 0 means it is lagging.
+MRS > 0 means the stock is stronger than the index relative to its own
+recent norm; MRS < 0 means it is lagging.
+
+Benchmark choice matters for correctness. yfinance with `auto_adjust=True`
+returns TOTAL-RETURN prices (dividends reinvested) for ETFs like SPY and
+the SPDR sector ETFs (XL*), but ^GSPC is a PRICE INDEX -- dividends are
+excluded from its history no matter how it's fetched. Comparing a total-
+return numerator to a price-index denominator introduces a systematic bias
+of roughly the S&P 500's dividend yield (~1.5-2%/yr) into every Mansfield
+RS reading, favoring high-yield sectors (XLU, XLP, XLRE, XLE) and
+penalising low-yield ones (XLK, XLY).
+
+Fix: benchmark to SPY, which under auto_adjust is total-return like the
+sectors. All Mansfield RS calculations become apples-to-apples.
 """
 
 from __future__ import annotations
@@ -26,14 +38,21 @@ log = logging.getLogger(__name__)
 
 
 BENCHMARKS: dict[str, str] = {
-    "US": "^GSPC",        # S&P 500
-    "DE": "^STOXX50E",    # EURO STOXX 50
+    # US: SPY (total-return ETF) not ^GSPC (price index), so Mansfield RS
+    # against the SPDR sector ETFs -- which are also total-return -- is
+    # unbiased. See module docstring.
+    "US": "SPY",
+    # European markets still use the EURO STOXX 50 price index for now.
+    # Same caveat applies: comparing to iShares MSCI Europe (IEUR, EXW1.DE)
+    # or similar total-return ETFs would be more consistent. Left as-is
+    # because we don't have a strong preferred total-return proxy.
+    "DE": "^STOXX50E",
     "GB": "^STOXX50E",
     "FR": "^STOXX50E",
     "IT": "^STOXX50E",
     "ES": "^STOXX50E",
 }
-_DEFAULT_BENCHMARK = "^GSPC"
+_DEFAULT_BENCHMARK = "SPY"
 
 
 def benchmark_for(market_code: str) -> str:
@@ -62,10 +81,10 @@ def get_weekly_close(loader: DataLoader, symbol: str,
 def detect_regime(loader: DataLoader, market_code: str,
                   sma_weeks: int = 30, slope_weeks: int = 5) -> dict:
     """
-    Classify the market regime from the benchmark index:
-      bull    — index above its 30W SMA and the SMA rising
-      bear    — index below its 30W SMA and the SMA falling
-      neutral — anything else
+    Classify the market regime from the benchmark:
+      bull    -- benchmark above its 30W SMA and the SMA rising
+      bear    -- benchmark below its 30W SMA and the SMA falling
+      neutral -- anything else
 
     A long-only screener can skip scanning in a bear regime.
     """
@@ -84,11 +103,11 @@ def detect_regime(loader: DataLoader, market_code: str,
     rising = slope > 0
 
     if above and rising:
-        regime, reason = "bull", "index above 30W SMA, SMA rising"
+        regime, reason = "bull", "benchmark above 30W SMA, SMA rising"
     elif (not above) and (not rising):
-        regime, reason = "bear", "index below 30W SMA, SMA falling"
+        regime, reason = "bear", "benchmark below 30W SMA, SMA falling"
     else:
-        regime, reason = "neutral", "index and SMA disagree"
+        regime, reason = "neutral", "benchmark and SMA disagree"
 
     return {"regime": regime, "benchmark": symbol, "reason": reason,
             "close": last_close, "sma": last_sma, "slope": slope}

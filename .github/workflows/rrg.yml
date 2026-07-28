@@ -1,0 +1,119 @@
+# Weekly sector Relative Rotation Graph -> Telegram. No local machine involved.
+#
+# ---------------------------------------------------------------------------
+# TWO SILENT-FAILURE MODES THIS FILE DEFENDS AGAINST
+# ---------------------------------------------------------------------------
+# 1. GitHub DISABLES scheduled workflows after 60 days with no repository
+#    activity, notifying only the repo owner by email. A weekly job in a repo
+#    you are not actively committing to WILL eventually stop, quietly. The
+#    "Persist data cache" step commits every run, which counts as activity and
+#    keeps the schedule alive indefinitely.
+#
+# 2. Yahoo Finance rate-limits and sometimes blocks cloud-provider IP ranges,
+#    which is exactly what GitHub-hosted runners are. Three defences:
+#      a. curl_cffi, so yfinance can impersonate a real browser TLS
+#         fingerprint, which clears most soft blocks;
+#      b. make_rrg.py retries with backoff;
+#      c. the committed data/ cache from previous runs, which make_rrg.py's
+#         ResilientLoader falls back to when a download fails outright -- so a
+#         hard block yields a chart built on last week's closes instead of no
+#         chart. Weekly bars rarely differ.
+#    If it still fails repeatedly, Yahoo simply will not serve this runner:
+#    switch `runs-on` to a self-hosted runner.
+#
+# Scheduled runs are best-effort: GitHub delays cron under load, sometimes by
+# 30+ minutes. Never read the delivery time as exact.
+# ---------------------------------------------------------------------------
+
+name: Sector RRG
+
+on:
+  schedule:
+    # Saturday 06:00 UTC = 08:00 in Madrid during CEST (late Mar - late Oct).
+    # GitHub cron is UTC-only with no DST handling, so from late October this
+    # arrives at 07:00 local. Use "0 7 * * 6" for the winter half if the exact
+    # hour matters. Markets are shut on Saturday, so the W-FRI weekly bar is
+    # already final -- a good moment to compute the RRG.
+    - cron: "0 6 * * 6"
+  workflow_dispatch:          # manual trigger from the Actions tab
+
+permissions:
+  contents: write             # needed to commit the refreshed data cache
+
+concurrency:
+  group: rrg
+  cancel-in-progress: false
+
+jobs:
+  rrg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "curl_cffi>=0.7" || echo "curl_cffi unavailable, continuing"
+
+      - name: Generate RRG and send to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set."
+            echo "Add them under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          mkdir -p docs
+          python scripts/make_rrg.py \
+            --out docs/rrg.png \
+            --json docs/rrg.json \
+            --telegram
+
+      # Keeps the schedule alive (note 1) AND preserves next week's fallback
+      # cache (note 2c). One small commit per week.
+      - name: Persist data cache
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data docs 2>/dev/null || true
+          if git diff --cached --quiet; then
+            git commit --allow-empty -m "chore(rrg): weekly run $(date -u +%F) [skip ci]"
+          else
+            git commit -m "chore(rrg): refresh data cache and chart $(date -u +%F) [skip ci]"
+          fi
+          git push
+
+      - name: Upload chart as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrg-${{ github.run_number }}
+          path: |
+            docs/rrg.png
+            docs/rrg.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      # Without this a failed run is only an email you will learn to ignore.
+      # Uses curl directly so it still fires when the Python step died early.
+      - name: Alert Telegram on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=VEKTOR RRG job FAILED. Logs: ${RUN_URL}" \
+            || echo "Could not send the failure alert."

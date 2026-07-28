@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VEKTOR — Sector RRG</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Standalone Relative Rotation Graph page.
+
+  Deliberately a SEPARATE page from index.html rather than a patch to it.
+  index.html's renderRRG() draws its own SVG from rs / rs_slope with the old
+  hunt/watch/avoid labels; editing that monolith in place is how version
+  drift happens. This page renders the same PNG the daily job and the GitHub
+  Action produce, so the browser, Telegram and Pages can never disagree.
+
+  Served two ways, both supported:
+    * by Flask at /rrg          (image from /api/rotation/chart.png, data from /api/rotation)
+    * as a static GitHub Pages index (image from rrg.png, data from rrg.json)
+  It detects which by trying the API first and falling back to the static files.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0d1117; color:#c9d1d9;
+         font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .wrap { max-width:1500px; margin:0 auto; padding:18px 20px 40px; }
+  h1 { font-size:16px; margin:0 0 2px; letter-spacing:.04em; }
+  .meta { color:#8b949e; font-size:12px; margin-bottom:14px; }
+  .cols { display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap; }
+  .chart { flex:1 1 720px; min-width:320px; }
+  .chart img { width:100%; height:auto; border:1px solid #30363d; border-radius:6px;
+               background:#0d1117; display:block; }
+  .side { flex:0 1 380px; min-width:300px; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th { text-align:left; color:#8b949e; font-weight:600; padding:5px 8px;
+       border-bottom:1px solid #30363d; font-size:11px; letter-spacing:.05em; }
+  td { padding:4px 8px; border-bottom:1px solid #1c2128; }
+  tr.qhead td { padding-top:12px; font-weight:700; letter-spacing:.06em;
+                border-bottom:none; font-size:11.5px; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .flag { color:#f1c40f; }
+  .err { color:#e03131; padding:10px 0; }
+  .leading{color:#2f9e44}.weakening{color:#f1c40f}
+  .lagging{color:#e03131}.improving{color:#1c7ed6}
+  .foot { color:#6e7681; font-size:11.5px; margin-top:16px; max-width:760px; }
+</style>
+<div class="wrap">
+  <h1>SECTOR ROTATION — RELATIVE ROTATION GRAPH</h1>
+  <div class="meta" id="meta">loading…</div>
+  <div class="cols">
+    <div class="chart"><img id="img" alt="Sector RRG"></div>
+    <div class="side">
+      <table>
+        <thead><tr>
+          <th>ETF</th><th>Sector</th>
+          <th class="num">Ratio</th><th class="num">Mom</th>
+          <th class="num">Dist</th><th class="num">Wks</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="foot">
+        Ranked leading → improving → weakening → lagging, then by distance from
+        the 100/100 crosshair. ◂ marks a sector that entered its quadrant this
+        week. Rotation is clockwise.
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const ORDER = ["leading","improving","weakening","lagging"];
+
+function row(s) {
+  const wks = (s.weeks_in_quadrant === null || s.weeks_in_quadrant === undefined)
+              ? "—" : s.weeks_in_quadrant + "w";
+  const flag = s.quadrant_changed ? ' <span class="flag">◂</span>' : "";
+  return `<tr class="${s.quadrant}">
+    <td>${s.etf}${flag}</td><td>${s.sector}</td>
+    <td class="num">${s.rs_ratio.toFixed(2)}</td>
+    <td class="num">${s.rs_momentum.toFixed(2)}</td>
+    <td class="num">${s.distance.toFixed(2)}</td>
+    <td class="num">${wks}</td></tr>`;
+}
+
+function render(payload, imgSrc) {
+  const sectors = payload.sectors || [];
+  document.getElementById("img").src = imgSrc + "?t=" + Date.now();
+  const gen = payload.generated_utc ? `generated ${payload.generated_utc}` : "live";
+  document.getElementById("meta").textContent =
+    `benchmark ${payload.benchmark || "SPY"} · ${sectors.length} sectors · ${gen}`;
+  let html = "";
+  for (const q of ORDER) {
+    const items = sectors.filter(s => s.quadrant === q);
+    if (!items.length) continue;
+    html += `<tr class="qhead ${q}"><td colspan="6">${q.toUpperCase()} (${items.length})</td></tr>`;
+    html += items.map(row).join("");
+  }
+  document.getElementById("tbody").innerHTML =
+    html || `<tr><td colspan="6" class="err">No sector data.</td></tr>`;
+}
+
+// Try the Flask API first; fall back to the static files GitHub Pages serves.
+fetch("/api/rotation?history=0")
+  .then(r => { if (!r.ok) throw new Error("no api"); return r.json(); })
+  .then(d => render(d, "/api/rotation/chart.png"))
+  .catch(() => fetch("rrg.json")
+    .then(r => r.json())
+    .then(d => render(d, "rrg.png"))
+    .catch(e => {
+      document.getElementById("meta").innerHTML =
+        `<span class="err">Could not load rotation data (${e}).</span>`;
+    }));
+</script>

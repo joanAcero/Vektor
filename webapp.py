@@ -228,6 +228,63 @@ def rotation_endpoint():
     return jsonify(payload)
 
 
+RRG_PNG_NAME = "rotation_chart.png"
+RRG_MAX_AGE_SECONDS = 6 * 3600  # regenerate at most every 6h per browser hit
+
+
+@app.get("/rrg")
+def rrg_page():
+    """Standalone Relative Rotation Graph page."""
+    return send_from_directory("web", "rrg.html")
+
+
+@app.get("/api/rotation/chart.png")
+def rotation_chart_png():
+    """
+    Serve the RRG image, regenerating it only when missing or stale.
+
+    Regenerating on every request would refetch 12 symbols and re-render
+    matplotlib for a page that a browser may request several times; the age
+    check keeps an open tab cheap while still picking up a new weekly bar.
+    Pass ?force=1 to rebuild immediately.
+    """
+    import time
+    from pathlib import Path
+
+    out_dir = Path(OUTPUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    png = out_dir / RRG_PNG_NAME
+
+    force = request.args.get("force") == "1"
+    stale = (not png.exists()
+             or (time.time() - png.stat().st_mtime) > RRG_MAX_AGE_SECONDS)
+
+    if force or stale:
+        from src.data_loader import DataLoader
+        from src.benchmarks import benchmark_for
+        from src.rotation import sector_rotation
+        from notifications.rotation_chart import plot_sector_rotation
+        try:
+            sectors = sector_rotation(DataLoader())
+            if sectors:
+                plot_sector_rotation(
+                    sectors, str(png),
+                    title="Sector rotation (RRG)",
+                    benchmark_label=benchmark_for("US"))
+        except Exception:  # noqa: BLE001
+            log.exception("RRG render failed")
+            # fall through: serve the stale image if we have one
+
+    if not png.exists():
+        return jsonify({"error": "RRG unavailable"}), 503
+    # no-store: the page appends a cache-busting query string anyway, but a
+    # stale image is the single most confusing failure mode for this view.
+    resp = send_from_directory(str(out_dir), RRG_PNG_NAME)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",

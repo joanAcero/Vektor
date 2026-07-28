@@ -1,16 +1,182 @@
 """
 weinstein_setup.py
 ------------------
-Weinstein Stage 1 -> Stage 2 pre-breakout setup, as a self-describing plugin.
+Weinstein Stage-1 detector, pre-breakout, as a FIXED trading system (no
+tunables). Recall-first architecture: catches EARLY bases (UBER/SONY-type,
+price still under a falling-but-decelerating MA), MID bases (Ferrari-type)
+and LONG mature bases (PFE/CPR.MI-type) with one rule set.
+
+Architecture: stabilization first, structure second
+===================================================
+v1-v3 of this file gated the signal on swing-cluster support/resistance
+detection. Production data showed that is the brittle component (levels
+resolved on ~2% of a 1,600-ticker universe) and every downstream condition
+failed mechanically with it. The detection order is now inverted:
+
+TIER 1 (gates -- robust, price-based):
+  * STABILIZATION: the longest trailing window in which weekly closes hold
+    inside a MAX_STAB_WIDTH band. This is the primary Stage-1 evidence; it
+    needs no swing points, no clustering, no tolerance tuning.
+  * PRIOR DECLINE: the stabilization must sit >= MIN_PRIOR_DECLINE below the
+    pre-base peak (within DECLINE_WINDOW_WEEKS). A range without a decline
+    before it is a Stage-3/consolidation, not a Stage 1.
+  * MA SHAPE (union, the recall fix): the 30W MA is either
+      (a) FLAT (slope inside MA_FLAT_BAND), the mature-base case, or
+      (b) FALLING BUT DECELERATING AND CONVERGED: slope above the freefall
+          floor, clearly less steep than MA_DECEL_LOOKBACK weeks ago, and
+          price within MAX_BELOW_MA of the MA. This is the early-base case
+          (UBER, SONY): price bases while the lagging MA is still catching
+          down. A pure "flat MA" rule misses exactly these.
+    In both branches the MA may not be clearly RISING (> MAX_MA_RISE_PCT):
+    that is a stock that already trended up, not a Stage-1 bottom.
+  * NOT BROKEN OUT: no sustained (3 consecutive weekly closes) break above
+    the range top on record more recent than the base itself.
+
+TIER 2 (score + display -- precise when available, never a gate):
+  * Swing-cluster S/R levels, touch counts, volume dry-up/build-up, RS.
+    When clusters resolve they refine the displayed Resistance/Support and
+    add score; when they don't, the stabilization range's high/low stand in,
+    so charts, Distance_to_Breakout and the plotter always have levels.
+
+The precision/recall position (explicit, on record)
+===================================================
+This configuration is deliberately recall-first: it will surface early bases
+that are, at detection time, INDISTINGUISHABLE from pauses in an ongoing
+decline (SONY today is exactly such a chart -- it becomes "a Stage 1" or "a
+Stage-4 pause" only in hindsight). The system's answer to that ambiguity is
+Weinstein's: the stop below support, and the fact that this is a WATCHLIST,
+not a buy signal -- the buy trigger remains the breakout with volume, price
+above a non-declining MA and RS turning up, confirmed by eye. If daily
+candidate volume becomes noise, tighten by RANKING (Readiness_Score floor),
+not by re-tightening gates -- that is what v3 did and it cost PFE/UBER/SONY.
+Expect meaningfully more matches per run than v3 produced; note
+daily_report.py caps photo attachments at MAX_ATTACHMENTS.
+
+Signal semantics
+================
+Signal = 1: "valid Stage-1 stabilization, not yet broken out" -- a watchlist
+certification. Stage column: informational 4-stage classification; any bar
+that signals is labelled Stage 1 by definition (the gates ARE the Stage-1
+test), which also covers the late-Stage-4-transition look of early bases.
+
+Failure modes
+=============
+* < ~LOOKBACK_WEEKS of history (recent IPOs): prior decline unobservable ->
+  fail-closed, never signals.
+* No benchmark injected: RS columns NaN, RS score components 0, one warning
+  logged; signals unaffected.
+* Level windows exclude the current bar (levels are history; the current bar
+  is tested against them).
 """
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
-from src.strategy import ParamSpec, Strategy, StrategyMeta
+from src.strategy import Strategy, StrategyMeta
 from src.registry import register
+
+log = logging.getLogger(__name__)
+
+# ======================================================================
+# BOOK CONSTANTS -- explicitly stated by Weinstein. Do not tune.
+# ======================================================================
+SMA_WEEKS = 30              # "La MM30 semanas es ideal para inversores."
+MA_SLOPE_WEEKS = 5          # slope measured over ~1 month of weekly bars
+RS_PERIOD_WEEKS = 52        # Mansfield RS zero line = 1-year RP average
+VOL_BREAKOUT_MULT = 2.0     # breakout volume >= 2x ...
+VOL_AVG_WEEKS = 4           # ... the previous 4-week average (weekly chart)
+VOL_BUILDUP_WEEKS = 8       # accumulation window before a breakout
+
+# ======================================================================
+# CALIBRATION CONSTANTS -- NOT in the book. Validate vs reference charts:
+# UBER, SONY (early); RACE, CRDA, ANE (mid); PFE, CPR.MI, CRON, PCRX, BIO,
+# GPN, TMO (long/valid v3 catches that must keep passing).
+# ======================================================================
+MIN_STAB_WEEKS = 10         # validity floor for the stabilization. LOW on
+                            # purpose (SONY ~18w, UBER ~25w must pass with
+                            # margin); long-term preference lives in the
+                            # SCORE, not in this gate.
+MAX_STAB_WIDTH = 0.40       # close-to-close band that defines "stabilized"
+STAB_OUTLIER_FRAC = 0.05    # bull traps / undershoots are ISOLATED closes
+                            # outside the band; up to 1 + 5% of the span may
+                            # be skipped instead of terminating the scan
+                            # (same rationale as the original breach budget:
+                            # two single-week excursions on opposite sides
+                            # must not veto a two-year structure)
+STAB_DRIFT_FRAC = 0.4       # a span is RECORDED as a base only if its LSQ
+                            # drift is <= this fraction of its own range
+                            # (horizontality). Drift is non-monotone in span
+                            # length -- high across one oscillation leg, low
+                            # across full cycles, high again once the window
+                            # tunnels into the prior decline -- so the scan
+                            # records the LARGEST compliant span rather than
+                            # stopping at the first violation.
+#                             (no hard-abort: intra-base legs can run 10+
+#                             monotone weeks, so any consecutive-violation
+#                             abort makes Base_Weeks depend on the phase of
+#                             the last oscillation and the signal flickers.
+#                             Decline-contaminated windows simply never meet
+#                             the recording criterion, which is the actual
+#                             anti-tunnel mechanism.)
+MAX_LEVEL_WIDTH = 0.50      # high/low width cap on the displayed range
+                            # (wicks legitimately run wider than the 40%
+                            # close-based band; PFE-type bases hit ~47%)
+MIN_PRIOR_DECLINE = 0.15    # a Stage 1 follows a considerable decline
+DECLINE_WINDOW_WEEKS = 260  # peak search window before the base (5y)
+MA_FLAT_BAND = (-1.0, 1.5)  # 5w %-slope band = "flat" (mature-base branch)
+MAX_MA_RISE_PCT = 1.5       # clearly rising MA = already trended, reject
+MAX_MA_DECLINE_PCT = 4.0    # freefall floor for the early-base branch
+MA_DECEL_LOOKBACK = 8       # deceleration reference: slope vs 8w ago
+MA_DECEL_MARGIN = 0.25      # slope must have improved by at least this
+MAX_BELOW_MA = 0.10         # early branch: price within 10% below the MA.
+                            # This distance is what separates "base with the
+                            # MA catching down onto it" (UBER 7%, SONY 8%)
+                            # from "pause far beneath a Stage-4 MA" (typical
+                            # mid-decline pause sits 15-25% under its MA).
+MAX_CLUSTER_WEEKS = 156     # cap on the Tier-2 cluster window. The window
+                            # IS the stabilization span (clusters describe
+                            # THIS base, so old structure above it cannot
+                            # out-vote the base's own resistance), capped
+                            # for cost on multi-year bases.
+TOUCH_TOL_MIN = 0.015       # touch tolerance floor
+TOUCH_TOL_MAX = 0.04        # ...and cap
+TOUCH_TOL_VOL_MULT = 0.6    # tolerance = this x median weekly range
+MIN_TOUCH_SEP_WEEKS = 3     # touches closer than this are one test
+BREAKOUT_CONSEC = 3         # sustained break = 3 consecutive weekly closes
+STAGE_TREND_PCT = 0.5       # |slope| beyond this + price side => stage 2/4
+STAGE_FALLBACK_WEEKS = 52   # 1-vs-3 fallback context without a decline obs
+RS_SLOPE_WEEKS = 10         # RS trend column (score + display)
+SCORE_PROX_HORIZON = 30.0   # % below resistance at which proximity = 0
+SCORE_BASE_HORIZON = 78.0   # weeks at which the base-size score saturates
+
+
+def _max_consecutive(mask: np.ndarray) -> int:
+    """Length of the longest run of True values in a boolean array."""
+    best = run = 0
+    for v in mask:
+        run = run + 1 if v else 0
+        if run > best:
+            best = run
+    return best
+
+
+def _rolling_lsq_slope(s: pd.Series, window: int) -> pd.Series:
+    """Least-squares slope per rolling window (consistent with
+    src/rotation.py's regression-slope choice)."""
+    x = np.arange(window, dtype=float)
+    x -= x.mean()
+    denom = float((x * x).sum())
+
+    def _slope(vals: np.ndarray) -> float:
+        if np.any(~np.isfinite(vals)):
+            return np.nan
+        return float((x * (vals - vals.mean())).sum() / denom)
+
+    return s.rolling(window).apply(_slope, raw=True)
 
 
 @register
@@ -18,232 +184,246 @@ class WeinsteinSetup(Strategy):
 
     meta = StrategyMeta(
         key="weinstein",
-        display_name="Weinstein Stage Setup",
+        display_name="Weinstein Stage-1 Base (pre-breakout)",
         description=(
-            "Detects Weinstein pre-breakout Stage 1 setups: stocks that came "
-            "from a decline, built a base, with the 30W MA flattening and price "
-            "coiled below resistance — about to break out but NOT yet. The "
-            "'base_length' preset controls how long a base must be (short catches "
-            "forming bottoms early; long requires mature bases). Designed to "
-            "catch stocks before the breakout and avoid extended names."
+            "Fixed Weinstein system, no tunables, recall-first: detects "
+            "price STABILIZATIONS (>= 10 weeks of closes holding a <= 40% "
+            "band) sitting >= 15% below their pre-base peak, with a 30W MA "
+            "that is either flat or falling-but-decelerating with price "
+            "converged onto it -- so it catches early bases while the MA is "
+            "still catching down (UBER/SONY-type), mid bases (Ferrari-type) "
+            "and long mature bases (PFE-type). Swing-cluster S/R levels, "
+            "touch counts, RS and volume character refine the score and the "
+            "chart but never gate the signal. Rank by Readiness_Score; the "
+            "buy decision stays manual at the breakout."
         ),
         signal_column="Signal",
         hit_values=(1,),
-        param_schema=(
-            ParamSpec("base_length", "short",
-                      lambda s: str(s).strip().lower(),
-                      "Base length preset: 'short' (~8w, catches forming bottoms early), "
-                      "'medium' (~14w), 'long' (~24w, mature bases), or 'custom' to use "
-                      "lookback_weeks/min_base_weeks directly.",
-                      choices=("short", "medium", "long", "custom")),
-            ParamSpec("sma_weeks", 30, int, "Weeks for the 30W moving average"),
-            ParamSpec("lookback_weeks", 36, int,
-                      "Analysis window (weeks). Only used when base_length='custom'."),
-            ParamSpec("min_base_weeks", 10, int,
-                      "Min weeks in the base. Only used when base_length='custom'."),
-            ParamSpec("min_touches", 2, int, "Minimum touches to RESISTANCE"),
-            ParamSpec("min_sup_touches", 2, int, "Minimum touches to SUPPORT"),
-            ParamSpec("touch_tolerance", 0.015, float, "Touch tolerance (fraction, 0.015 = 1.5%)"),
-            ParamSpec("max_base_breach_frac", 0.10, float,
-                      "Max fraction of base weeks whose CLOSE may sit outside the "
-                      "support/resistance zone. Low = the base must respect its levels "
-                      "(a real trading range). Higher = tolerate a sloppier range."),
-            ParamSpec("max_range_vs_decline", 1.2, float,
-                      "Max base width as a fraction of the prior decline. A healthy base "
-                      "consolidates within a fraction of what it fell; rejects wide "
-                      "oscillation while accepting tight bases at any price level."),
-            ParamSpec("max_dist_to_breakout", 30.0, float,
-                      "pre_breakout: max %% below resistance (price still in/near the base)"),
-            ParamSpec("min_prior_decline", 0.15, float,
-                      "Min drop from the pre-base peak (fraction). A real Stage 1 follows "
-                      "a considerable decline; the key filter against extended names."),
-            ParamSpec("max_ma_decline_pct", 8.0, float,
-                      "Max the 30W MA may be FALLING (5-week slope, %%). Generous: we "
-                      "want to catch bottoms early while the MA is still declining."),
-            ParamSpec("max_ma_rise_pct", 1.5, float,
-                      "Max the 30W MA may be RISING (5-week slope, %%). Strict: a Stage-1 "
-                      "base has a flat/falling MA. A rising MA means the stock already "
-                      "trended up (Stage 2) or is consolidating within an uptrend — NOT a "
-                      "Stage-1 bottom. Rejects names that just rallied into a range."),
-            ParamSpec("require_volume", False,
-                      lambda s: str(s).strip().lower() in ("1", "true", "yes", "y"),
-                      "Require volume expansion (off by default; a confirming filter)"),
-            ParamSpec("require_rs_positive", False,
-                      lambda s: str(s).strip().lower() in ("1", "true", "yes", "y"),
-                      "Require Mansfield RS > 0 (off by default; filter by eye afterwards)"),
-            ParamSpec("rs_period", 52, int, "Mansfield RS lookback (weeks)"),
-        ),
+        param_schema=(),  # fixed system: one configuration, run consistently
         display_columns=(
-            "Stage", "Resistance", "Support", "Range_Width_Pct", "Base_Weeks",
-            "Distance_to_Breakout", "Prior_Decline_Pct", "Mansfield_RS",
-            "Res_Touches", "Sup_Touches", "Vol_Spike_2x", "Vol_4W_Expansion",
+            "Stage", "Readiness_Score", "Resistance", "Support",
+            "Range_Width_Pct", "Base_Weeks", "Distance_to_Breakout",
+            "Prior_Decline_Pct", "Mansfield_RS", "RS_Slope_10W",
+            "Res_Touches", "Sup_Touches", "Vol_Dryup", "Vol_Buildup_8W",
             "Sector", "Industry",
         ),
-        sort_by=("Market", "Distance_to_Breakout"),
-        sort_ascending=(True, True),
+        sort_by=("Market", "Readiness_Score"),
+        sort_ascending=(True, False),
     )
-
-    # Preset table: base_length -> (lookback_weeks, min_base_weeks, min_sup_touches).
-    # A forming bottom ('short') has often bounced off support only ONCE, so we
-    # relax the support-touch requirement there; mature bases keep 2.
-    _BASE_PRESETS = {
-        "short":  (20, 8, 1),
-        "medium": (30, 14, 2),
-        "long":   (44, 24, 2),
-    }
-
-    # ---- convenient aliases onto validated params -------------------------
-    @property
-    def sma_period(self) -> int:
-        return self.params["sma_weeks"]
-
-    @property
-    def _preset(self):
-        return self._BASE_PRESETS.get(self.params["base_length"])
-
-    @property
-    def lookback(self) -> int:
-        preset = self._preset
-        return preset[0] if preset else self.params["lookback_weeks"]
-
-    @property
-    def min_base(self) -> int:
-        preset = self._preset
-        return preset[1] if preset else self.params["min_base_weeks"]
-
-    @property
-    def min_sup_touches(self) -> int:
-        preset = self._preset
-        return preset[2] if preset else self.params["min_sup_touches"]
-
-    @property
-    def tolerance(self) -> float:
-        return self.params["touch_tolerance"]
 
     # ---- benchmark injection (for Mansfield relative strength) ------------
     def __init__(self, **params):
         super().__init__(**params)
-        self._benchmark_weekly = None  # set per-market by the screener
+        self._benchmark_weekly = None   # injected per-market by the Screener
+        self._warned_no_benchmark = False
 
-    def set_benchmark(self, weekly_close):
-        """Receive the market's benchmark weekly close series (for Mansfield RS)."""
+    def set_benchmark(self, weekly_close) -> None:
+        """Receive the market's benchmark weekly close series (Mansfield RS)."""
         self._benchmark_weekly = weekly_close
 
     # ------------------------------------------------------------------
-    # PRIVATE HELPERS
+    # TIER 1 -- STABILIZATION (the primary Stage-1 evidence)
     # ------------------------------------------------------------------
-    def _swing_extremes(self, arr: np.ndarray, mode: str) -> np.ndarray:
-        extremes = []
-        for i in range(1, len(arr) - 1):
-            if mode == "peaks" and arr[i] >= arr[i - 1] and arr[i] >= arr[i + 1]:
-                extremes.append(arr[i])
-            elif mode == "troughs" and arr[i] <= arr[i - 1] and arr[i] <= arr[i + 1]:
-                extremes.append(arr[i])
-        return np.array(extremes) if extremes else np.array([])
-
-    def _swing_extreme_indices(self, arr: np.ndarray, mode: str) -> list[int]:
-        indices = []
-        for i in range(1, len(arr) - 1):
-            if mode == "peaks" and arr[i] >= arr[i - 1] and arr[i] >= arr[i + 1]:
-                indices.append(i)
-            elif mode == "troughs" and arr[i] <= arr[i - 1] and arr[i] <= arr[i + 1]:
-                indices.append(i)
-        return indices
-
-    def _dominant_cluster(self, extremes: np.ndarray) -> tuple[float, int]:
-        extremes = extremes[np.isfinite(extremes) & (extremes > 0)]
-        if len(extremes) == 0:
-            return np.nan, 0
-        best_level = extremes[0]
-        best_count = 1
-        for anchor in extremes:
-            if anchor <= 0 or not np.isfinite(anchor):
+    @staticmethod
+    def _stabilization(closes: np.ndarray) -> np.ndarray:
+        """For each bar, the LARGEST trailing span of weekly closes that is
+        (a) BOUNDED: total range within MAX_STAB_WIDTH, and
+        (b) HORIZONTAL: absolute LSQ drift across the span at most
+            STAB_DRIFT_FRAC of the span's own range.
+        (a) alone is insufficient: any decline shallower than the band "fits"
+        and the walk-back tunnels through it into the prior plateau. (b) is
+        what separates a base (oscillation) from a trend segment (drift) --
+        but drift is non-monotone in span length (see constants), so the scan
+        RECORDS the largest compliant span and only aborts on a sustained
+        hard violation (STAB_HARD_RUN consecutive extensions with drift >
+        STAB_DRIFT_HARD of range), i.e. once it is demonstrably inside a
+        trend. Regression sums are maintained incrementally: O(1) per
+        extension."""
+        n = len(closes)
+        out = np.zeros(n)
+        for i in range(n):
+            ci = closes[i]
+            if not np.isfinite(ci) or ci <= 0:
                 continue
-            mask = np.abs(extremes - anchor) / anchor <= self.tolerance
-            count = int(np.sum(mask))
-            if count > best_count:
-                best_count = count
-                best_level = float(np.mean(extremes[mask]))
-        return best_level, best_count
+            c_hi = c_lo = ci
+            s1 = sx = sxy = sxx = 0.0
+            m = 0
+            best = 0
+            skipped = 0
+            for j in range(i, -1, -1):
+                cj = closes[j]
+                if not np.isfinite(cj) or cj <= 0:
+                    break
+                nh = max(c_hi, cj)
+                nl = min(c_lo, cj)
+                if (nh - nl) / nl > MAX_STAB_WIDTH:
+                    # isolated outlier close (bull trap / undershoot): skip it
+                    # against the budget instead of terminating; it neither
+                    # widens the band nor enters the regression, but it DOES
+                    # count toward the base's chronological length.
+                    if skipped < 1 + int(STAB_OUTLIER_FRAC * (m + skipped)):
+                        skipped += 1
+                        continue
+                    break
+                m_t = m + 1
+                s1_t, sx_t = s1 + cj, sx + j
+                sxy_t, sxx_t = sxy + j * cj, sxx + j * j
+                total = m_t + skipped
+                if m_t >= 3 and nh > nl:
+                    denom = m_t * sxx_t - sx_t * sx_t
+                    slope = (m_t * sxy_t - sx_t * s1_t) / denom if denom > 0 else 0.0
+                    rel = abs(slope) * (m_t - 1) / (nh - nl)
+                    if rel <= STAB_DRIFT_FRAC:
+                        best = total
+                else:
+                    best = total
+                c_hi, c_lo = nh, nl
+                s1, sx, sxy, sxx, m = s1_t, sx_t, sxy_t, sxx_t, m_t
+            out[i] = best
+        return out
 
-    def _analyse_window(self, highs, lows, closes) -> dict:
-        swing_highs = self._swing_extremes(highs, "peaks")
-        if len(swing_highs) >= 2:
-            res_level, res_touches = self._dominant_cluster(swing_highs)
+    @staticmethod
+    def _range_bounds(highs: np.ndarray, lows: np.ndarray,
+                      spans: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Fallback range levels: highest high / lowest low over each bar's
+        stabilization span. Always defined when a stabilization exists, so
+        every candidate has levels for charts and distance metrics."""
+        n = len(spans)
+        top = np.full(n, np.nan)
+        bot = np.full(n, np.nan)
+        for i in range(n):
+            k = int(spans[i])
+            if k < 2:
+                continue
+            top[i] = float(np.nanmax(highs[i - k + 1:i + 1]))
+            bot[i] = float(np.nanmin(lows[i - k + 1:i + 1]))
+        return top, bot
+
+    # ------------------------------------------------------------------
+    # TIER 2 -- SWING-CLUSTER LEVELS (score + display refinement only)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _effective_tol(highs: np.ndarray, lows: np.ndarray,
+                       closes: np.ndarray) -> float:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rng = (highs - lows) / closes
+        rng = rng[np.isfinite(rng) & (rng > 0)]
+        if len(rng) == 0:
+            return TOUCH_TOL_MIN
+        return float(np.clip(TOUCH_TOL_VOL_MULT * np.median(rng),
+                             TOUCH_TOL_MIN, TOUCH_TOL_MAX))
+
+    @staticmethod
+    def _swing_points(arr: np.ndarray, mode: str) -> tuple[np.ndarray, np.ndarray]:
+        """(indices, values) of swing extremes, plateaus collapsed."""
+        idxs: list[int] = []
+        vals: list[float] = []
+        n = len(arr)
+        i = 1
+        while i < n - 1:
+            v = arr[i]
+            if mode == "peaks":
+                is_ext = v >= arr[i - 1] and v >= arr[i + 1]
+            else:
+                is_ext = v <= arr[i - 1] and v <= arr[i + 1]
+            if is_ext:
+                j = i
+                while j + 1 < n - 1 and arr[j + 1] == v:
+                    j += 1
+                idxs.append(i)
+                vals.append(float(v))
+                i = j + 1
+            else:
+                i += 1
+        return np.asarray(idxs, dtype=int), np.asarray(vals, dtype=float)
+
+    @staticmethod
+    def _separated(indices: np.ndarray) -> list[int]:
+        if len(indices) == 0:
+            return []
+        kept = [int(indices[0])]
+        for k in indices[1:]:
+            if k - kept[-1] >= MIN_TOUCH_SEP_WEEKS:
+                kept.append(int(k))
+        return kept
+
+    def _dominant_cluster(self, idxs: np.ndarray, vals: np.ndarray,
+                          tol: float) -> tuple[float, int, list[int]]:
+        finite = np.isfinite(vals) & (vals > 0)
+        idxs, vals = idxs[finite], vals[finite]
+        if len(vals) == 0:
+            return np.nan, 0, []
+        best_level, best_kept = np.nan, []
+        for anchor in vals:
+            mask = np.abs(vals - anchor) / anchor <= tol
+            kept = self._separated(np.sort(idxs[mask]))
+            if len(kept) > len(best_kept):
+                best_kept = kept
+                best_level = float(np.mean(vals[mask]))
+        return best_level, len(best_kept), best_kept
+
+    def _analyse_window(self, highs: np.ndarray, lows: np.ndarray,
+                        closes: np.ndarray) -> dict:
+        tol = self._effective_tol(highs, lows, closes)
+
+        pk_i, pk_v = self._swing_points(highs, "peaks")
+        if len(pk_v) >= 2:
+            res_level, res_touches, res_kept = self._dominant_cluster(pk_i, pk_v, tol)
         else:
-            res_level = float(np.nanmax(highs)) if len(highs) > 0 else np.nan
-            res_touches = 1
+            res_level, res_touches, res_kept = np.nan, 0, []
 
-        swing_lows = self._swing_extremes(lows, "troughs")
-        if len(swing_lows) >= 2:
-            sup_level, sup_touches = self._dominant_cluster(swing_lows)
+        tr_i, tr_v = self._swing_points(lows, "troughs")
+        if len(tr_v) >= 2:
+            sup_level, sup_touches, sup_kept = self._dominant_cluster(tr_i, tr_v, tol)
         else:
-            sup_level = float(np.nanmin(lows)) if len(lows) > 0 else np.nan
-            sup_touches = 1
+            sup_level, sup_touches, sup_kept = np.nan, 0, []
 
-        if np.isfinite(res_level) and res_level > 0:
-            strict_res_ceiling = res_level * (1 + self.tolerance)
-            res_touch_indices = np.where(np.abs(highs - res_level) / res_level <= self.tolerance)[0]
-            if len(res_touch_indices) > 0:
-                first_res_idx = res_touch_indices[0]
-                breaches = int(np.sum(closes[first_res_idx:] > strict_res_ceiling))
-                if breaches >= 2:
-                    res_touches = 0
-                    res_level = np.nan
+        # Invalidation: only a SUSTAINED decisive break (3+ consecutive
+        # closes past 2*tol) after the level was established (2nd touch),
+        # never revisited afterwards, kills a level. Bull traps survive.
+        if np.isfinite(res_level) and res_level > 0 and len(res_kept) >= 2:
+            anchor = res_kept[1]
+            ceiling = res_level * (1 + 2 * tol)
+            if _max_consecutive(closes[anchor:] > ceiling) >= BREAKOUT_CONSEC \
+                    and res_kept[-1] <= anchor:
+                res_level, res_touches = np.nan, 0
+        if np.isfinite(sup_level) and sup_level > 0 and len(sup_kept) >= 2:
+            anchor = sup_kept[1]
+            floor_ = sup_level * (1 - 2 * tol)
+            if _max_consecutive(closes[anchor:] < floor_) >= BREAKOUT_CONSEC \
+                    and sup_kept[-1] <= anchor:
+                sup_level, sup_touches = np.nan, 0
 
-        if np.isfinite(sup_level) and sup_level > 0:
-            strict_sup_floor = sup_level * (1 - self.tolerance)
-            sup_touch_indices = np.where(np.abs(lows - sup_level) / sup_level <= self.tolerance)[0]
-            if len(sup_touch_indices) > 0:
-                first_sup_idx = sup_touch_indices[0]
-                breaches = int(np.sum(closes[first_sup_idx:] < strict_sup_floor))
-                if breaches >= 2:
-                    sup_touches = 0
-                    sup_level = np.nan
+        return {"res": res_level, "res_touches": res_touches,
+                "sup": sup_level, "sup_touches": sup_touches, "tol": tol}
 
-        half_tol = self.tolerance / 2
-        res_zone_top = res_level * (1 + half_tol)
-        res_zone_bot = res_level * (1 - half_tol)
-        sup_zone_top = sup_level * (1 + half_tol)
-        sup_zone_bot = sup_level * (1 - half_tol)
-
-        if sup_level and np.isfinite(sup_level) and sup_level > 0 and np.isfinite(res_level):
-            range_width = (res_level - sup_level) / sup_level
-        else:
-            range_width = np.nan
-
-        return {
-            "resistance": res_level, "res_zone_top": res_zone_top,
-            "res_zone_bot": res_zone_bot, "res_touches": res_touches,
-            "support": sup_level, "sup_zone_top": sup_zone_top,
-            "sup_zone_bot": sup_zone_bot, "sup_touches": sup_touches,
-            "range_width": range_width,
-        }
-
-    def _mark_touch_bars(self, w_df, highs, lows, n) -> None:
+    def _mark_touch_bars(self, w_df: pd.DataFrame, highs: np.ndarray,
+                         lows: np.ndarray, n: int) -> None:
+        """Annotate touch bars for the FINAL window (chart overlay)."""
         w_df["Is_Res_Touch"] = False
         w_df["Is_Sup_Touch"] = False
-        if n <= self.lookback:
+        k = min(int(w_df["Base_Weeks"].iloc[-1]), MAX_CLUSTER_WEEKS)
+        if k < 6 or n - 1 - k < 0:
             return
         last = w_df.iloc[-1]
-        res_level = last["Resistance"]
-        sup_level = last["Support"]
-        win_start = (n - 1) - self.lookback
-        win_end = n - 1
-        if win_start < 0:
-            return
-        w_highs = highs[win_start:win_end]
-        w_lows = lows[win_start:win_end]
+        res_level, sup_level = last["Resistance"], last["Support"]
+        win_start = (n - 1) - k
+        w_highs = highs[win_start:n - 1]
+        w_lows = lows[win_start:n - 1]
+        tol = self._effective_tol(w_highs, w_lows,
+                                  w_df["Close"].values[win_start:n - 1])
+        res_col = w_df.columns.get_loc("Is_Res_Touch")
+        sup_col = w_df.columns.get_loc("Is_Sup_Touch")
         if np.isfinite(res_level) and res_level > 0:
-            for local_i in self._swing_extreme_indices(w_highs, "peaks"):
-                h = w_highs[local_i]
-                if abs(h - res_level) / res_level <= self.tolerance:
-                    w_df.iat[win_start + local_i, w_df.columns.get_loc("Is_Res_Touch")] = True
+            pk_i, pk_v = self._swing_points(w_highs, "peaks")
+            for local_i, v in zip(pk_i, pk_v):
+                if abs(v - res_level) / res_level <= tol:
+                    w_df.iat[win_start + int(local_i), res_col] = True
         if np.isfinite(sup_level) and sup_level > 0:
-            for local_i in self._swing_extreme_indices(w_lows, "troughs"):
-                l = w_lows[local_i]
-                if abs(l - sup_level) / sup_level <= self.tolerance:
-                    w_df.iat[win_start + local_i, w_df.columns.get_loc("Is_Sup_Touch")] = True
+            tr_i, tr_v = self._swing_points(w_lows, "troughs")
+            for local_i, v in zip(tr_i, tr_v):
+                if abs(v - sup_level) / sup_level <= tol:
+                    w_df.iat[win_start + int(local_i), sup_col] = True
 
     # ------------------------------------------------------------------
     # PUBLIC INTERFACE
@@ -262,194 +442,232 @@ class WeinsteinSetup(Strategy):
         lows = w_df["Low"].values
         closes = w_df["Close"].values
 
-        cols = ["Resistance", "Res_Zone_Top", "Res_Zone_Bot", "Res_Touches",
-                "Support", "Sup_Zone_Top", "Sup_Zone_Bot", "Sup_Touches",
-                "Range_Width_Pct"]
-        arrays = {c: np.full(n, np.nan) for c in cols}
+        # ---- TIER 1: stabilization + fallback range -----------------------
+        spans = self._stabilization(closes)
+        fb_top, fb_bot = self._range_bounds(highs, lows, spans)
+        w_df["Base_Weeks"] = spans  # name kept: plotter/report read Base_Weeks
 
-        for i in range(self.lookback, n):
-            w_high = highs[i - self.lookback:i]
-            w_low = lows[i - self.lookback:i]
-            w_close = closes[i - self.lookback:i]
-            m = self._analyse_window(w_high, w_low, w_close)
-            arrays["Resistance"][i] = m["resistance"]
-            arrays["Res_Zone_Top"][i] = m["res_zone_top"]
-            arrays["Res_Zone_Bot"][i] = m["res_zone_bot"]
-            arrays["Res_Touches"][i] = m["res_touches"]
-            arrays["Support"][i] = m["support"]
-            arrays["Sup_Zone_Top"][i] = m["sup_zone_top"]
-            arrays["Sup_Zone_Bot"][i] = m["sup_zone_bot"]
-            arrays["Sup_Touches"][i] = m["sup_touches"]
-            arrays["Range_Width_Pct"][i] = m["range_width"] * 100
+        # ---- TIER 2: cluster levels (score/display refinement) ------------
+        cl = {c: np.full(n, np.nan) for c in
+              ("c_res", "c_sup", "c_res_t", "c_sup_t", "tol")}
+        for i in range(n):
+            k = min(int(spans[i]), MAX_CLUSTER_WEEKS)
+            if k < 6 or i - k < 0:
+                continue
+            m = self._analyse_window(highs[i - k:i],
+                                     lows[i - k:i],
+                                     closes[i - k:i])
+            cl["c_res"][i] = m["res"]
+            cl["c_sup"][i] = m["sup"]
+            cl["c_res_t"][i] = m["res_touches"]
+            cl["c_sup_t"][i] = m["sup_touches"]
+            cl["tol"][i] = m["tol"]
 
-        for col, arr in arrays.items():
-            w_df[col] = arr
+        # Effective levels: the cluster level refines the fallback when it is
+        # coherent with the current price and range; otherwise the range
+        # bounds stand in. Every stabilized bar therefore HAS levels.
+        tol_arr = np.where(np.isfinite(cl["tol"]), cl["tol"], TOUCH_TOL_MIN)
+        use_res = (np.isfinite(cl["c_res"]) & (cl["c_res"] >= closes) &
+                   np.isfinite(fb_top) & (cl["c_res"] <= fb_top * 1.10))
+        use_sup = (np.isfinite(cl["c_sup"]) & (cl["c_sup"] <= closes) &
+                   np.isfinite(fb_bot) & (cl["c_sup"] >= fb_bot * 0.90))
+        res_eff = np.where(use_res, cl["c_res"], fb_top)
+        sup_eff = np.where(use_sup, cl["c_sup"], fb_bot)
+
+        half = tol_arr / 2
+        w_df["Touch_Tol_Pct"] = tol_arr * 100
+        w_df["Resistance"] = res_eff
+        w_df["Support"] = sup_eff
+        w_df["Res_Zone_Top"] = res_eff * (1 + half)
+        w_df["Res_Zone_Bot"] = res_eff * (1 - half)
+        w_df["Sup_Zone_Top"] = sup_eff * (1 + half)
+        w_df["Sup_Zone_Bot"] = sup_eff * (1 - half)
+        w_df["Res_Touches"] = np.where(np.isfinite(cl["c_res_t"]), cl["c_res_t"], 0)
+        w_df["Sup_Touches"] = np.where(np.isfinite(cl["c_sup_t"]), cl["c_sup_t"], 0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w_df["Range_Width_Pct"] = (res_eff - sup_eff) / sup_eff * 100
+        w_df["Distance_to_Breakout"] = (res_eff - closes) / closes * 100
 
         self._mark_touch_bars(w_df, highs, lows, n)
 
-        w_df["SMA_30W"] = w_df["Close"].rolling(window=self.sma_period).mean()
-        w_df["SMA_Slope"] = w_df["SMA_30W"].diff(5)
+        # ---- 30W MA and slope --------------------------------------------
+        w_df["SMA_30W"] = w_df["Close"].rolling(window=SMA_WEEKS).mean()
+        w_df["SMA_Slope"] = w_df["SMA_30W"].diff(MA_SLOPE_WEEKS)
         w_df["SMA_Slope_Pct"] = (w_df["SMA_Slope"] / w_df["SMA_30W"]) * 100
 
-        w_df["Vol_Avg_Prev_4W"] = w_df["Volume"].shift(1).rolling(window=4).mean()
-        w_df["Vol_Spike_2x"] = np.where(w_df["Volume"] >= 2 * w_df["Vol_Avg_Prev_4W"], 1, 0)
-        w_df["Vol_Avg_Curr_4W"] = w_df["Volume"].rolling(window=4).mean()
-        w_df["Vol_Baseline"] = w_df["Volume"].shift(4).rolling(window=12).mean()
-        w_df["Vol_4W_Expansion"] = np.where(w_df["Vol_Avg_Curr_4W"] >= 2 * w_df["Vol_Baseline"], 1, 0)
+        # ---- volume (columns + score; never a gate) -----------------------
+        w_df["Vol_Avg_Prev_4W"] = w_df["Volume"].shift(1).rolling(VOL_AVG_WEEKS).mean()
+        w_df["Vol_Spike_2x"] = np.where(
+            w_df["Volume"] >= VOL_BREAKOUT_MULT * w_df["Vol_Avg_Prev_4W"], 1, 0)
+        w_df["Vol_Avg_Curr_4W"] = w_df["Volume"].rolling(VOL_AVG_WEEKS).mean()
+        w_df["Vol_Baseline"] = w_df["Volume"].shift(VOL_AVG_WEEKS).rolling(12).mean()
+        w_df["Vol_4W_Expansion"] = np.where(
+            w_df["Vol_Avg_Curr_4W"] >= VOL_BREAKOUT_MULT * w_df["Vol_Baseline"], 1, 0)
         w_df["Vol_vs_Avg"] = (w_df["Volume"] / w_df["Vol_Avg_Prev_4W"]).round(2)
+        w_df["Vol_Base_Avg"] = w_df["Volume"].rolling(26).mean()
+        dry = w_df["Vol_Avg_Curr_4W"] < w_df["Vol_Base_Avg"]
+        w_df["Vol_Dryup"] = np.where(
+            w_df["Vol_Avg_Curr_4W"].notna() & w_df["Vol_Base_Avg"].notna() & dry, 1, 0)
+        vol_slope = _rolling_lsq_slope(w_df["Volume"].astype(float), VOL_BUILDUP_WEEKS)
+        w_df["Vol_Buildup_8W"] = np.where(vol_slope > 0, 1, 0)
 
-        w_df["Distance_to_Breakout"] = (
-            (w_df["Res_Zone_Bot"] - w_df["Close"]) / w_df["Close"] * 100)
+        # ---- prior decline (fail-closed when unobservable) ----------------
+        w_df["Prior_Decline_Pct"] = self._prior_decline(highs, res_eff, spans) * 100
 
-        w_df["Base_Weeks"] = self._base_duration(w_df)
-        w_df["Prior_Decline_Pct"] = self._prior_decline(w_df) * 100
+        # ---- breakout tracking (sustained breaks only) --------------------
+        w_df["Weeks_Since_Breakout"] = self._weeks_since_breakout(
+            closes, w_df["Res_Zone_Top"].values, spans)
+
+        # ---- relative strength (score + display) --------------------------
         w_df["Mansfield_RS"] = self._mansfield(w_df)
-        w_df["Weeks_Since_Breakout"] = self._weeks_since_breakout(w_df)
+        w_df["RS_Slope_10W"] = _rolling_lsq_slope(w_df["Mansfield_RS"], RS_SLOPE_WEEKS)
+        if self._benchmark_weekly is None and not self._warned_no_benchmark:
+            log.warning(
+                "WeinsteinSetup: no benchmark injected -> Mansfield RS is NaN; "
+                "RS score components contribute 0. Signals unaffected. "
+                "Call set_benchmark() (the Screener does this per market).")
+            self._warned_no_benchmark = True
 
         # ============================ SIGNAL ============================
-        p = self.params
+        ma = w_df["SMA_30W"]
+        slope = w_df["SMA_Slope_Pct"]
+        close_s = w_df["Close"]
 
-        cond_res_touches = w_df["Res_Touches"] >= p["min_touches"]
-        cond_sup_touches = w_df["Sup_Touches"] >= self.min_sup_touches
-        with np.errstate(divide="ignore", invalid="ignore"):
-            width_vs_decline = w_df["Range_Width_Pct"] / w_df["Prior_Decline_Pct"]
-        cond_width = width_vs_decline <= p["max_range_vs_decline"]
-        cond_base_len = w_df["Base_Weeks"] >= self.min_base
-        cond_prior_decline = w_df["Prior_Decline_Pct"] >= p["min_prior_decline"] * 100
-        cond_volume = (w_df["Vol_Spike_2x"] == 1) | (w_df["Vol_4W_Expansion"] == 1)
+        # 1) Stabilized long enough, in a sane, resolvable range.
+        cond_base_len = w_df["Base_Weeks"] >= MIN_STAB_WEEKS
+        cond_width = (w_df["Range_Width_Pct"] <= MAX_LEVEL_WIDTH * 100) & \
+                     (w_df["Range_Width_Pct"] >= 3.0 * w_df["Touch_Tol_Pct"])
 
-        rs_ok = w_df["Mansfield_RS"] > 0
-        if self._benchmark_weekly is None:
-            rs_ok = pd.Series(True, index=w_df.index)
+        # 2) A considerable decline demonstrably preceded the base.
+        cond_prior_decline = w_df["Prior_Decline_Pct"] >= MIN_PRIOR_DECLINE * 100
 
-        base_common = cond_res_touches & cond_sup_touches & cond_width & cond_base_len
-
-        # Pre-breakout: coiled under resistance, base built after a decline, 30W
-        # MA flat (not necessarily rising yet), price NOT yet broken out, near
-        # the breakout level. We catch the stock BEFORE it breaks.
-        cond_coiled = (w_df["Distance_to_Breakout"] > 0) & \
-                      (w_df["Distance_to_Breakout"] <= p["max_dist_to_breakout"])
-        # "Not broken": no breakout on record, or the last one is older than the
-        # base itself (i.e. not a fresh breakout we'd be chasing).
+        # 3) Price inside the range, no sustained breakout fresher than the
+        #    base itself.
+        cond_in_base = (close_s >= w_df["Sup_Zone_Bot"]) & \
+                       (close_s <= w_df["Res_Zone_Top"])
         cond_not_broken = w_df["Weeks_Since_Breakout"].isna() | \
-                          (w_df["Weeks_Since_Breakout"] > self.min_base)
-        # MA must be flat or falling — NOT rising. Asymmetric band: tolerate a
-        # steep decline (catch early bottoms) but reject a rising MA (stock that
-        # already turned up / is consolidating in an uptrend, like ABUS).
-        cond_ma_flat = (w_df["SMA_Slope_Pct"] >= -p["max_ma_decline_pct"]) & \
-                       (w_df["SMA_Slope_Pct"] <= p["max_ma_rise_pct"])
-        cond_revisited = pd.Series(self._touched_support_recently(w_df) >= 1,
-                                   index=w_df.index)
-        signal = (base_common & cond_coiled & cond_not_broken &
-                  cond_ma_flat & cond_prior_decline & cond_revisited)
-        if p["require_volume"]:
-            signal = signal & cond_volume
-        if p["require_rs_positive"]:
-            signal = signal & rs_ok
+                          (w_df["Weeks_Since_Breakout"] > MIN_STAB_WEEKS)
+
+        # 4) MA shape: flat (mature base) OR falling-but-decelerating with
+        #    price converged onto the MA (early base) -- never clearly rising.
+        flat = slope.between(MA_FLAT_BAND[0], MA_FLAT_BAND[1])
+        decel = slope >= slope.shift(MA_DECEL_LOOKBACK) + MA_DECEL_MARGIN
+        near_ma = close_s >= ma * (1 - MAX_BELOW_MA)
+        early = (slope >= -MAX_MA_DECLINE_PCT) & decel
+        cond_ma_shape = near_ma & (slope <= MAX_MA_RISE_PCT) & (flat | early)
+
+        signal = (cond_base_len & cond_width & cond_prior_decline &
+                  cond_in_base & cond_not_broken & cond_ma_shape)
 
         self._cond_cols = {
-            "res_touches": cond_res_touches,
-            "sup_touches": cond_sup_touches,
-            "width_vs_decline": cond_width,
+            # levels_found: DIAGNOSTIC ONLY -- did the swing clusters resolve?
+            # It no longer gates anything; when False, Resistance/Support are
+            # the stabilization-range bounds instead of cluster levels.
+            "levels_found": pd.Series(np.isfinite(cl["c_res"]) &
+                                      np.isfinite(cl["c_sup"]),
+                                      index=w_df.index),
             "base_len": cond_base_len,
+            "width": cond_width,
             "prior_decline": cond_prior_decline,
-            "coiled": cond_coiled,
+            "in_base": cond_in_base,
             "not_broken": cond_not_broken,
-            "ma_flat": cond_ma_flat,
-            "revisited_support": cond_revisited,
-            "volume": cond_volume if p["require_volume"] else pd.Series(True, index=w_df.index),
-            "rs_positive": rs_ok if p["require_rs_positive"] else pd.Series(True, index=w_df.index),
+            "ma_shape": cond_ma_shape,
         }
         for cname, cseries in self._cond_cols.items():
             w_df[f"Cond_{cname}"] = cseries.fillna(False).astype(bool)
 
-        w_df["Stage"] = "pre_breakout"
-        w_df["Signal"] = np.where(signal, 1, 0)
+        signal_arr = signal.fillna(False).values
+        w_df["Signal"] = np.where(signal_arr, 1, 0)
+
+        # ---- informational stage classification ---------------------------
+        adv = (close_s > ma) & (slope > STAGE_TREND_PCT)
+        dec = (close_s < ma) & (slope < -STAGE_TREND_PCT)
+        prior_ok = w_df["Prior_Decline_Pct"].notna()
+        declined = prior_ok & cond_prior_decline
+        ma_fb = ma.shift(STAGE_FALLBACK_WEEKS)
+        trans_is_1 = np.where(prior_ok.values, declined.values, (ma < ma_fb).values)
+        unknown = ma.isna() | slope.isna() | (~prior_ok & ma_fb.isna())
+        stage_num = np.select([unknown.values, adv.values, dec.values, trans_is_1],
+                              [0, 2, 4, 1], default=3)
+        # A signalling bar IS the Stage-1 certification: the label must agree
+        # (covers both the late-Stage-4 look of early bases and the
+        # Stage-2-cannot-precede-its-breakout override).
+        stage_num = np.where(signal_arr, 1, stage_num)
+        w_df["Stage_Num"] = stage_num
+        w_df["Stage"] = pd.Series(stage_num, index=w_df.index).map(
+            {0: "-", 1: "1", 2: "2", 3: "3", 4: "4"})
+
+        # ======================= READINESS SCORE =======================
+        # Ranking only. Max 100. Long-term preference lives HERE.
+        prox = (1 - w_df["Distance_to_Breakout"].clip(lower=0)
+                / SCORE_PROX_HORIZON).clip(0, 1).fillna(0)
+        base_sz = (w_df["Base_Weeks"] / SCORE_BASE_HORIZON).clip(0, 1).fillna(0)
+        touches = ((w_df["Res_Touches"].clip(0, 3) +
+                    w_df["Sup_Touches"].clip(0, 3)) / 6.0).fillna(0)
+        w_df["Readiness_Score"] = (
+            20.0 * prox                                            # near breakout
+            + 25.0 * base_sz                                       # bigger base
+            + 15.0 * touches                                       # tested levels
+            + 5.0 * (close_s >= ma).astype(float)                  # above the MA
+            + 5.0 * (slope > 0).astype(float)                      # MA turned up
+            + 5.0 * (w_df["Mansfield_RS"] > 0).astype(float)       # RS positive
+            + 10.0 * (w_df["RS_Slope_10W"] > 0).astype(float)      # RS improving
+            + 7.5 * w_df["Vol_Dryup"]                              # base dried up
+            + 7.5 * w_df["Vol_Buildup_8W"]                         # accumulation
+        ).round(1)
+
         return w_df
 
     # ------------------------------------------------------------------
     # METRIC HELPERS
     # ------------------------------------------------------------------
-    def _base_duration(self, w_df: pd.DataFrame) -> np.ndarray:
-        n = len(w_df)
-        out = np.zeros(n)
-        closes = w_df["Close"].values
-        sup = w_df["Sup_Zone_Bot"].values
-        res = w_df["Res_Zone_Top"].values
-        # Fraction of weeks allowed to close OUTSIDE the support/resistance zone
-        # band during the base. The band already includes a tolerance margin, so
-        # a close outside it is a real breach. Keep this small: the base must
-        # actually respect its levels (a genuine trading range), not merely
-        # spend "most" of its time near them.
-        budget = self.params["max_base_breach_frac"]
-        for i in range(n):
-            if not (np.isfinite(sup[i]) and np.isfinite(res[i])):
-                continue
-            out_band = 0
-            span = 0
-            for j in range(i, -1, -1):
-                inside = sup[i] <= closes[j] <= res[i]
-                if not inside:
-                    out_band += 1
-                span += 1
-                # Allow 1 isolated breach, then enforce the fraction budget.
-                if out_band > 1 and out_band > budget * span:
-                    span -= 1
-                    break
-            out[i] = span
-        return out
-
-    def _prior_decline(self, w_df: pd.DataFrame) -> np.ndarray:
-        n = len(w_df)
+    @staticmethod
+    def _prior_decline(highs: np.ndarray, res_eff: np.ndarray,
+                       spans: np.ndarray) -> np.ndarray:
+        """Fractional drop from the pre-base peak (within
+        DECLINE_WINDOW_WEEKS before the stabilization start) to the range
+        top. NaN (fail-closed) when the decline is not observable."""
+        n = len(res_eff)
         out = np.full(n, np.nan)
-        highs = w_df["High"].values
-        res = w_df["Resistance"].values
-        base_weeks = w_df["Base_Weeks"].values if "Base_Weeks" in w_df.columns else None
         for i in range(n):
-            if not np.isfinite(res[i]):
+            if not (np.isfinite(res_eff[i]) and res_eff[i] > 0):
                 continue
-            base_len = int(base_weeks[i]) if base_weeks is not None and np.isfinite(base_weeks[i]) else self.lookback
-            base_start = max(0, i - base_len)
+            base_start = i - int(spans[i])
             if base_start <= 0:
                 continue
-            pre_peak = float(np.nanmax(highs[:base_start]))
+            w0 = max(0, base_start - DECLINE_WINDOW_WEEKS)
+            seg = highs[w0:base_start]
+            if len(seg) == 0 or not np.any(np.isfinite(seg)):
+                continue
+            pre_peak = float(np.nanmax(seg))
             if pre_peak <= 0:
                 continue
-            out[i] = (pre_peak - res[i]) / pre_peak
+            out[i] = (pre_peak - res_eff[i]) / pre_peak
         return out
 
-    def _weeks_since_breakout(self, w_df: pd.DataFrame) -> np.ndarray:
-        n = len(w_df)
+    @staticmethod
+    def _weeks_since_breakout(closes: np.ndarray, res_top: np.ndarray,
+                              spans: np.ndarray) -> np.ndarray:
+        """Weeks since the last SUSTAINED break (BREAKOUT_CONSEC consecutive
+        closes above the zone top) of an established base. Anchored at the
+        first bar of the run, and only when the bar before the run was still
+        below its own level -- so the event is dated once, at the actual
+        transition, instead of re-dating forward every week of a rally."""
+        n = len(closes)
         out = np.full(n, np.nan)
-        closes = w_df["Close"].values
-        res_top = w_df["Res_Zone_Top"].values
-        base_weeks = w_df["Base_Weeks"].values if "Base_Weeks" in w_df.columns else None
-        min_base = max(4, self.min_base // 2)
+        min_established = max(4, MIN_STAB_WEEKS // 2)
         last_breakout = None
-        for i in range(n):
-            if i > 0 and np.isfinite(res_top[i]) and closes[i] > res_top[i] >= closes[i - 1]:
-                established = (base_weeks is None or
-                              (np.isfinite(base_weeks[i - 1]) and base_weeks[i - 1] >= min_base))
-                if established:
-                    last_breakout = i
+        k = BREAKOUT_CONSEC
+        for i in range(k, n):
+            run_ok = all(np.isfinite(res_top[i - j]) and
+                         closes[i - j] > res_top[i - j] for j in range(k))
+            before = i - k
+            was_below = (np.isfinite(res_top[before]) and
+                         closes[before] <= res_top[before])
+            if run_ok and was_below and spans[before] >= min_established:
+                last_breakout = i - (k - 1)
             if last_breakout is not None:
                 out[i] = i - last_breakout
-        return out
-
-    def _touched_support_recently(self, w_df: pd.DataFrame) -> np.ndarray:
-        n = len(w_df)
-        out = np.zeros(n)
-        lows = w_df["Low"].values
-        sup = w_df["Support"].values
-        base_weeks = w_df["Base_Weeks"].values
-        tol = self.tolerance
-        for i in range(n):
-            if not (np.isfinite(sup[i]) and sup[i] > 0):
-                continue
-            recent = max(2, int(base_weeks[i] // 2)) if np.isfinite(base_weeks[i]) else 4
-            start = max(0, i - recent + 1)
-            seg = lows[start:i + 1]
-            out[i] = int(np.sum(np.abs(seg - sup[i]) / sup[i] <= tol))
         return out
 
     def _mansfield(self, w_df: pd.DataFrame) -> pd.Series:
@@ -457,5 +675,5 @@ class WeinsteinSetup(Strategy):
             return pd.Series(np.nan, index=w_df.index)
         from src.benchmarks import mansfield_rs
         mrs = mansfield_rs(w_df["Close"], self._benchmark_weekly,
-                           n=self.params["rs_period"])
+                           n=RS_PERIOD_WEEKS)
         return mrs.reindex(w_df.index)

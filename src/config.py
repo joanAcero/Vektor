@@ -35,7 +35,7 @@ class RunConfig:
     us_tickers: list[str] = field(default_factory=list)  # used when us_source=="ticker"
     us_top_n_industries: int = 0
     us_perf_col: str = "Perf Week"
-    us_rotation_states: list[str] = field(default_factory=lambda: ["Rotating In"])
+    us_rotation_states: list[str] = field(default_factory=lambda: ["hunt"])
     # ^ used when us_source=="rotation": which src/rotation.py states to scan
     #   within (see market_us.py::collect_us_by_rotation).
     data_start: str = "2020-01-01"
@@ -148,7 +148,7 @@ def load_config(path: str | Path, overrides: dict[str, Any] | None = None) -> Ru
         us_source=market.get("source", "industries"),
         us_top_n_industries=int(market.get("top_n_industries", 0)),
         us_perf_col=market.get("perf_col", "Perf Week"),
-        us_rotation_states=list(market.get("rotation_states", ["Rotating In"]) or ["Rotating In"]),
+        us_rotation_states=list(market.get("rotation_states", ["hunt"]) or ["watch"]),
         data_start=data.get("data_start", "2020-01-01"),
         chart_start=data.get("chart_start", "2021-01-01"),
         output_dir=data.get("output_dir", "results"),

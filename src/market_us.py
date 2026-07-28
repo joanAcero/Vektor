@@ -73,12 +73,12 @@ FINVIZ_SECTOR_NAME: dict[str, str] = {
 }
 
 
-def collect_us_by_rotation(loader, states: list[str] | tuple[str, ...] = ("Rotating In",),
+def collect_us_by_rotation(loader, states: list[str] | tuple[str, ...] = ("hunt",),
                            ) -> tuple[list[str], pd.DataFrame]:
     """
     Sector-rotation-driven candidate sourcing: run the sector money-flow
     monitor first (src/rotation.py::sector_rotation), keep only sectors
-    currently in one of `states` (default: just "Rotating In" -- the early
+    currently in one of `states` (default: just "hunt" -- the early
     signal), and collect every liquid ticker Finviz lists under those sectors.
 
     Deliberately sector-level only, not sector -> industry -> ticker:

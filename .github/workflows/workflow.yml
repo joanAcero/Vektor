@@ -1,0 +1,106 @@
+# Scheduled Relative Rotation Graph.
+#
+# Produces results/rotation_chart.png on a schedule and publishes it three
+# ways, so you never have to run anything locally to see the picture:
+#   1. a workflow ARTIFACT (always; private to repo collaborators)
+#   2. TELEGRAM (optional; set the two secrets below)
+#   3. GITHUB PAGES (optional; gives a permanent bookmarkable URL)
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE RELYING ON IT
+# ---------------------------------------------------------------------------
+# Yahoo Finance rate-limits and sometimes outright blocks requests from cloud
+# provider IP ranges, which is exactly what GitHub-hosted runners are. This
+# workflow WILL fail intermittently for that reason and nothing in the code
+# can fully fix it. make_rrg.py retries with backoff, which handles most
+# transient refusals, but not a hard block.
+#
+# If it proves unreliable, the robust fix is a SELF-HOSTED RUNNER on the
+# machine that already runs your cron job: same workflow file, but add
+#   runs-on: self-hosted
+# and the fetch happens from your residential IP, which Yahoo does not throttle.
+# See: Settings > Actions > Runners > New self-hosted runner.
+#
+# Scheduled runs are also best-effort: GitHub delays cron during peak load,
+# sometimes by 30+ minutes. Never treat the timestamp as exact.
+# ---------------------------------------------------------------------------
+
+name: Sector RRG
+
+on:
+  schedule:
+    # 22:15 UTC Mon-Fri: after the US close (21:00 UTC / 20:00 during DST),
+    # with margin for Yahoo to settle the daily bar.
+    - cron: "15 22 * * 1-5"
+  workflow_dispatch:        # lets you trigger it by hand from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rrg
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate RRG
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          mkdir -p docs
+          EXTRA=""
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then EXTRA="--telegram"; fi
+          python scripts/make_rrg.py \
+            --out docs/rrg.png \
+            --json docs/rrg.json $EXTRA
+
+      - name: Build the Pages index
+        run: |
+          cp web/rrg.html docs/index.html
+
+      - name: Upload artifact (always available, repo-private)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrg-${{ github.run_number }}
+          path: |
+            docs/rrg.png
+            docs/rrg.json
+          retention-days: 30
+
+      # --- OPTIONAL: publish to GitHub Pages for a bookmarkable URL ---------
+      # Delete this step and the `deploy` job if you do not want the chart
+      # publicly readable. NOTE: Pages from a PRIVATE repo is public unless
+      # you are on GitHub Enterprise -- the content here is only public-ETF
+      # sector rotation, but decide deliberately rather than by default.
+      - name: Package Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

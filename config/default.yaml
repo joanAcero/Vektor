@@ -8,27 +8,27 @@ strategy: weinstein          # default strategy; override with --strategy
 # no other edits. Omit a strategy's block entirely to use its declared defaults.
 strategy_params:
 
-  weinstein:
-    base_length: long        # short | medium | long | custom
-                                # NOTE: when base_length != custom, the preset table in
-                                # weinstein_setup.py overrides lookback_weeks, min_base_weeks
-                                # and min_sup_touches below (medium preset: 30, 14, 2) --
-                                # they only take effect if you set base_length: custom.
-    sma_weeks: 30
-    lookback_weeks: 36         # only used when base_length: custom (medium preset uses 30)
-    min_base_weeks: 10         # only used when base_length: custom (medium preset uses 14)
-    min_touches: 2             # resistance touches -- always active, no preset override
-    min_sup_touches: 2         # only used when base_length: custom (medium preset also uses 2)
-    touch_tolerance: 0.01     # fraction, 0.015 == 1.5%
-    max_base_breach_frac: 0.10
-    max_range_vs_decline: 1.2
-    max_dist_to_breakout: 30.0
-    min_prior_decline: 0.15
-    max_ma_decline_pct: 8.0
-    max_ma_rise_pct: 1.5
-    require_volume: false
-    require_rs_positive: false
-    rs_period: 52
+#  weinstein:
+#    base_length: long        # short | medium | long | custom
+#                                # NOTE: when base_length != custom, the preset table in
+#                                # weinstein_setup.py overrides lookback_weeks, min_base_weeks
+#                                # and min_sup_touches below (medium preset: 30, 14, 2) --
+#                                # they only take effect if you set base_length: custom.
+#    sma_weeks: 30
+#    lookback_weeks: 36         # only used when base_length: custom (medium preset uses 30)
+#    min_base_weeks: 10         # only used when base_length: custom (medium preset uses 14)
+#    min_touches: 2             # resistance touches -- always active, no preset override
+#    min_sup_touches: 2         # only used when base_length: custom (medium preset also uses 2)
+#    touch_tolerance: 0.01     # fraction, 0.015 == 1.5%
+#    max_base_breach_frac: 0.10
+#    max_range_vs_decline: 1.2
+#    max_dist_to_breakout: 30.0
+#    min_prior_decline: 0.15
+#    max_ma_decline_pct: 8.0
+#    max_ma_rise_pct: 1.5
+#    require_volume: false
+#    require_rs_positive: false
+#    rs_period: 52
 
   # "Follow the money": Stage-2 leaders with positive RS that are NOT yet
   # overextended above their 30W MA. Complement to weinstein (that one finds

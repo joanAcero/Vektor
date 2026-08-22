@@ -4,6 +4,86 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VEKTOR — Run a screen</title>
+<!--
+  VEKTOR web UI.
+
+  ONE RULE THIS FILE MUST NOT BREAK
+  ---------------------------------
+  Plots are NOT drawn here. The RRG comes from notifications/rotation_chart.py,
+  the stage charts from notifications/stage_chart.py and the setup charts from
+  strategies/weinstein_chart.py (via src/plotter.py) — all served as PNGs.
+  Those are the identical images daily_report.py pushes to Telegram, so
+  browser, Telegram and GitHub Pages cannot disagree.
+
+  A previous version of this file contained a hand-written SVG renderer for
+  the RRG. It read `s.trail`, `p.rs` and `p.rs_slope`; src/rotation.py emits
+  `tail` with `rs_ratio` / `rs_momentum`. Every tail coordinate evaluated to
+  NaN, the browser silently dropped the elements, and the plot looked
+  plausible with no tails and no console error. That is the generic failure
+  mode of a second implementation of one specification.
+
+  NAMING
+  ------
+  This panel is the TARGET. The API payload and config/default.yaml still say
+  `market`, and RunConfig still has market_mode / us_source / intl_source. That
+  divergence is deliberate and documented at the top of src/config.py.
+
+  NO LIST IN THIS FILE IS MAINTAINED BY HAND
+  ------------------------------------------
+  Strategy order comes from webapp.py. The Quality labels come from
+  src/holdings.py. The index checkboxes come from src/indices.py via
+  us_indices. The sector and industry names come from Finviz via /api/groups.
+  A hardcoded copy of any of them would be a second source of truth that goes
+  stale silently. The only literal lists below are the RRG quadrant names and
+  the stage palette, both documented as deliberate mirrors.
+
+  STAGES
+  ------
+  Every stage decision comes from classify() in src/stages.py. The four hex
+  values in --s1..--s4 mirror STAGE_COLOR there; change both together.
+
+  MONITOR TABLE AND GALLERY ORDER
+  -------------------------------
+  Ordered by `hunt_rank` (stage 2 -> 1 -> 3 -> 4 -> unknown) then rs_momentum
+  descending. hunt_rank comes from src/rotation.py, which gets it from
+  hunt_rank() in src/stages.py. This file only performs the mechanical sort.
+
+  SCREENER OUTPUT IS ONE CHART AT A TIME
+  --------------------------------------
+  The results table is written to results/<strategy>_setups.csv by run.py and
+  is deliberately NOT rendered here: this is a visual method, and a wall of
+  numbers above the charts competes with them for attention.
+
+  Charts are shown ONE AT A TIME with a position counter, not as a scrolling
+  strip. With a hundred matches a strip cannot tell you where you are or when
+  you are done, and a half-width thumbnail grid cannot be read at all. Arrow
+  keys, the two buttons and a click on the image move through one index.
+
+  SECTOR CENSUS = SECTOR FILTER
+  -----------------------------
+  The census chips are buttons. None pressed shows everything; pressing one or
+  more restricts the viewer to those sectors. The counts stay ABSOLUTE while
+  filtering — a census that renumbers itself as you press chips cannot be read,
+  because you would be choosing between figures describing the choice you just
+  made.
+
+  Sorting rules:
+    * "Default" preserves the server-side order (StrategyMeta.sort_by).
+    * Blanks sort LAST in both directions.
+    * The sort is STABLE, so ordering by Sector groups the sectors while
+      keeping the strategy's own ranking inside each group.
+
+  DATA CONTRACT (see webapp.py)
+  -----------------------------
+  GET  /api/strategies              -> {strategies:[...], intl_markets:[...],
+                                        quality_labels:{us,intl},
+                                        us_indices:[{key,label}]}
+  GET  /api/groups?kind=sector      -> {groups:[...]} | {error}
+  POST /api/run                     -> {columns,rows,count,charts,note?} | {error}
+  GET  /api/rotation?history=0      -> {sectors:[...]}
+  GET  /api/rotation/chart.png      -> the RRG image
+  GET  /api/stage-chart/<SYM>.png   -> a weekly chart with stage bands
+-->
 <style>
   :root {
     --bg: #0e1116;
@@ -12,11 +92,25 @@
     --ink: #e6edf3;
     --muted: #8b949e;
     --accent: #2f81f7;
-    --accent-dim: #1f6feb33;
     --ok: #3fb950;
-    --warn: #d29922;
+    --err: #f85149;
     --field: #0d1117;
     --radius: 6px;
+
+    /* StockCharts quadrant palette. Mirrors QUADRANT_COLOR in src/rotation.py. */
+    --q-leading:   #2f9e44;
+    --q-improving: #1c7ed6;
+    --q-weakening: #f1c40f;
+    --q-lagging:   #e03131;
+
+    /* Stage palette. Absolute trend, NOT relative — a separate axis of meaning
+       from the quadrant colours above, so a separate palette. Mirrors
+       STAGE_COLOR in src/stages.py. Spread on TWO channels because hue alone
+       is unreliable for red-green colour deficiency. */
+    --s1: #0072b2;   /* base    */
+    --s2: #009e73;   /* advance */
+    --s3: #f0a202;   /* top     */
+    --s4: #9e1b32;   /* decline */
   }
   * { box-sizing: border-box; }
   body {
@@ -26,7 +120,7 @@
     font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 760px; margin: 0 auto; padding: 48px 24px 80px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 48px 24px 80px; }
   header { margin-bottom: 32px; }
   h1 {
     font-size: 15px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
@@ -47,6 +141,13 @@
     color: var(--muted); margin-bottom: 14px;
   }
 
+  /* Strategy and Target side by side: they are chosen together, and stacking
+     them pushed the Run button below the fold. */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+          align-items: start; margin-bottom: 16px; }
+  .cols > .panel { margin-bottom: 0; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+
   label { display: block; }
   .field { margin-bottom: 14px; }
   .field:last-child { margin-bottom: 0; }
@@ -59,322 +160,680 @@
     border: 1px solid var(--line); border-radius: var(--radius);
     font: inherit;
   }
-  select:focus, input:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent); }
+  select:focus-visible, input:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  select:disabled { opacity: .55; }
+  input[type=checkbox] { accent-color: var(--accent); margin-right: 8px; }
 
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .check { display: flex; align-items: center; font-size: 13px; }
 
-  .check { display: flex; align-items: center; gap: 8px; }
-  .check input { width: auto; }
-
-  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .seg { display: flex; }
   .seg button {
-    background: var(--field); color: var(--muted); border: 0; padding: 8px 16px;
-    font: inherit; cursor: pointer;
+    flex: 1; padding: 8px 12px; font: inherit; cursor: pointer;
+    background: var(--field); color: var(--muted); border: 1px solid var(--line);
   }
-  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
-
-  .mkts { display: flex; flex-wrap: wrap; gap: 8px; }
-  .mkts label {
-    display: inline-flex; align-items: center; gap: 6px;
-    border: 1px solid var(--line); border-radius: var(--radius);
-    padding: 6px 10px; font-size: 13px; cursor: pointer; color: var(--muted);
-  }
-  .mkts input { width: auto; }
-  .mkts label:has(input:checked) { color: var(--ink); border-color: var(--accent); background: var(--accent-dim); }
+  .seg button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+  .seg button:last-child  { border-radius: 0 var(--radius) var(--radius) 0; border-left: none; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
 
   .run {
-    width: 100%; padding: 12px; margin-top: 4px;
-    background: var(--accent); color: #fff; border: 0; border-radius: var(--radius);
-    font: inherit; font-weight: 600; cursor: pointer; letter-spacing: .03em;
+    width: 100%; padding: 11px 16px; font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; border: none; border-radius: var(--radius);
   }
-  .run:disabled { opacity: .55; cursor: progress; }
+  .run:disabled { opacity: .5; cursor: default; }
 
-  #status { min-height: 20px; font-size: 13px; color: var(--muted); margin: 14px 2px; }
-  #status.err { color: #f85149; }
-  #status.ok { color: var(--ok); }
+  #status, #monitor-status { font-size: 13px; margin-top: 10px; color: var(--muted); }
+  #status.ok, #monitor-status.ok { color: var(--ok); }
+  #status.err, #monitor-status.err { color: var(--err); }
 
-  table { width: 100%; border-collapse: collapse; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
-  td:first-child, th:first-child { padding-left: 0; }
+  th { color: var(--muted); font-weight: 600; }
   .scroll { overflow-x: auto; }
   .muted { color: var(--muted); }
   .hidden { display: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums;
+         font-family: ui-monospace, Menlo, Consolas, monospace; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; color: var(--ink); }
+
+  /* Sector census, doubling as the filter control. */
+  .summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+             font-size: 13px; color: var(--muted); margin-top: 14px; }
+  .summary .total { color: var(--ink); }
+  .summary .chip { background: var(--field); border: 1px solid var(--line);
+                   border-radius: 20px; padding: 3px 11px;
+                   color: var(--muted); font: inherit; font-size: 12px;
+                   cursor: pointer; line-height: 1.4; }
+  .summary .chip:hover { border-color: var(--accent); color: var(--ink); }
+  .summary .chip b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .summary .chip[aria-pressed="true"] { background: var(--accent); color: #fff;
+                                        border-color: var(--accent); }
+  .summary .chip[aria-pressed="true"] b { color: #fff; }
+  .summary .clear { background: none; border: none; color: var(--accent);
+                    cursor: pointer; font: inherit; font-size: 12px;
+                    text-decoration: underline; padding: 0 2px; }
+  .summary .note { font-size: 12px; }
+
+  /* Sort controls for the chart viewer. */
+  .sortbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+             margin-bottom: 14px; font-size: 13px; }
+  .sortbar .lbl { color: var(--muted); }
+  .sortbar select { width: auto; min-width: 190px; }
+  .sortbar .dir { padding: 8px 12px; font: inherit; cursor: pointer;
+                  background: var(--field); color: var(--ink);
+                  border: 1px solid var(--line); border-radius: var(--radius); }
+  .sortbar .dir:disabled { opacity: .45; cursor: default; }
+  .sortbar .hint { color: var(--muted); font-size: 12px; }
+
+  /* One chart at a time. See the file header for why this is not a strip. */
+  .viewer { border: 1px solid var(--line); border-radius: var(--radius);
+            overflow: hidden; background: #fff; }
+  .vbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+          padding: 8px 10px; background: var(--field);
+          border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .vbar .nav { padding: 4px 12px; font: inherit; line-height: 1.2; cursor: pointer;
+               background: var(--panel); color: var(--ink);
+               border: 1px solid var(--line); border-radius: var(--radius); }
+  .vbar .nav:disabled { opacity: .35; cursor: default; }
+  .vbar .pos { font-family: ui-monospace, Menlo, Consolas, monospace;
+               font-variant-numeric: tabular-nums; color: var(--ink);
+               min-width: 74px; text-align: center; }
+  .vbar .who { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--ink); }
+  .vbar .key { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); }
+  .vbar .spacer { flex: 1; }
+  .vbar .keys { color: var(--muted); font-size: 11.5px; }
+  /* White while the PNG loads: a dark flash behind a white chart reads as a
+     rendering failure. */
+  .vimg { background: #fff; min-height: 220px; }
+  .vimg img { display: block; width: 100%; height: auto; cursor: pointer; }
+  .vimg .failed, .vimg .empty { color: #6e7681; font-size: 12.5px;
+                                padding: 40px 12px; text-align: center; }
 
   .desc {
-    font-size: 13px; color: var(--muted); line-height: 1.55;
+    font-size: 13px; color: var(--muted); line-height: 1.6;
     margin: -4px 0 16px; padding: 12px 14px;
     background: var(--field); border: 1px solid var(--line);
     border-left: 2px solid var(--accent); border-radius: var(--radius);
   }
   .desc:empty { display: none; }
+  .desc p { margin: 0 0 10px; }
+  .desc p:last-child { margin-bottom: 0; }
+  .desc b { color: var(--ink); }
 
-  .charts { display: grid; gap: 18px; margin-top: 18px; }
-  .chart-card { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #fff; }
-  .chart-card .cap {
-    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
-    color: var(--ink); background: var(--field); padding: 6px 10px; border-bottom: 1px solid var(--line);
+  /* Collapsible explainers: available on demand, not shouting on every load. */
+  details.doc {
+    background: var(--field); border: 1px solid var(--line);
+    border-left: 2px solid var(--accent); border-radius: var(--radius);
+    margin-bottom: 14px;
   }
-  .chart-card img { display: block; width: 100%; height: auto; }
+  details.doc > summary {
+    cursor: pointer; padding: 10px 14px; font-size: 12px; font-weight: 600;
+    letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+    list-style: none;
+  }
+  details.doc > summary::-webkit-details-marker { display: none; }
+  details.doc > summary::before { content: "▸ "; }
+  details.doc[open] > summary::before { content: "▾ "; }
+  details.doc > summary:hover { color: var(--ink); }
+  .doc-body { padding: 0 14px 14px; font-size: 13px; color: var(--muted); line-height: 1.65; }
+  .doc-body p { margin: 0 0 10px; }
+  .doc-body p:last-child { margin-bottom: 0; }
+  .doc-body b { color: var(--ink); }
+  .doc-body ul { margin: 0 0 10px; padding-left: 18px; }
+  .doc-body li { margin-bottom: 5px; }
+  .doc-body .caveat { border-left: 2px solid #d29922; padding-left: 10px; margin-top: 12px; }
+  .doc-body table.cycle { width: auto; margin: 4px 0 10px; font-size: 12.5px; }
+  .doc-body table.cycle td { border: none; padding: 2px 14px 2px 0; white-space: nowrap; }
+  .doc-body table.cycle td:first-child {
+    font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--ink); }
 
-  .tabs { display:flex; gap:8px; margin:0 0 16px; }
-  .tab { background:var(--field); color:var(--muted); border:1px solid var(--line);
-         padding:8px 16px; border-radius:var(--radius); cursor:pointer; font-weight:600; }
-  .tab[aria-pressed="true"] { background:var(--accent); color:#fff; border-color:var(--accent); }
-  .tbl { width:100%; border-collapse:collapse; font-size:14px; }
-  .tbl th, .tbl td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
-  .tbl th { color:var(--muted); font-weight:600; }
-  .badge { padding:2px 8px; border-radius:6px; font-size:12px; font-weight:700; }
+  .tabs { display: flex; gap: 8px; margin: 0 0 16px; }
+  .tab { background: var(--field); color: var(--muted); border: 1px solid var(--line);
+         padding: 8px 16px; border-radius: var(--radius); cursor: pointer; font: inherit; font-weight: 600; }
+  .tab[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
 
-  /* State badge colors -- must match RRG plot palette below. */
-  .st-hunt  { background:#052e1a; color:#4ade80; }
-  .st-watch { background:#0b2a4a; color:#60a5fa; }
-  .st-avoid { background:#1c222b; color:#9aa4b2; }
-  .stage-badge { background:var(--field); color:var(--muted); }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 700;
+           font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .q-leading   { background: #0c2c17; color: var(--q-leading); }
+  .q-improving { background: #0b2340; color: var(--q-improving); }
+  .q-weakening { background: #322a06; color: var(--q-weakening); }
+  .q-lagging   { background: #360f0f; color: var(--q-lagging); }
+  /* Stage badges are SOLID; quadrant badges above are dark-tinted. Both
+     palettes contain a green, so the fill STYLE is what separates the two
+     kinds of label at a glance. */
+  .stage1 { background: var(--s1); color: #ffffff; }
+  .stage2 { background: var(--s2); color: #ffffff; }
+  .stage3 { background: var(--s3); color: #ffffff; }
+  .stage4 { background: var(--s4); color: #ffffff; }
+  .stageunknown { background: var(--field); color: var(--muted); border: 1px solid var(--line); }
+  .state-badge { background: var(--field); color: var(--muted); border: 1px solid var(--line); }
 
-  .timeline { display:flex; gap:2px; flex-wrap:nowrap; }
-  .cell { display:inline-block; min-width:22px; text-align:center; padding:2px 0;
-          border-radius:3px; font-size:10px; font-weight:700; font-family:ui-monospace,monospace; }
-  .scroll { overflow-x:auto; }
+  tr.stage-break td { border-top: 2px solid var(--line); }
 
-  /* Money-flow (RRG) plot container: capped small so it stays interpretable. */
-  #rrg-plot { display:flex; justify-content:center;
-              background:#161b22; border:1px solid var(--line);
-              border-radius:var(--radius); padding:6px; }
-  #rrg-plot svg { max-width:520px; width:100%; height:auto; }
-  /* Grouped ETF list below the plot: the unambiguous "which are which". */
-  .rrg-groups { margin-top:10px; display:flex; flex-direction:column; gap:6px;
-                font-size:12.5px; }
-  .rrg-groups .row { display:flex; align-items:baseline; gap:10px; }
-  .rrg-groups .row .badge { flex-shrink:0; }
-  .rrg-groups .etfs { color:var(--ink); font-family:ui-monospace,Menlo,Consolas,monospace;
-                      font-size:12px; }
-  .rrg-groups .etfs .muted { color:var(--muted); }
-  .rrg-groups .empty { color:var(--muted); font-style:italic; }
+  /* RRG image. Same PNG as Telegram — never a browser-side redraw. */
+  #rrg-plot { background: var(--field); border: 1px solid var(--line);
+              border-radius: var(--radius); padding: 6px; }
+  #rrg-plot img { display: block; width: 100%; height: auto; border-radius: 4px; }
+  #rrg-plot .placeholder { color: var(--muted); font-size: 13px; padding: 40px 12px; text-align: center; }
+
+  .rrg-groups { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+  .rrg-groups .row { display: flex; align-items: baseline; gap: 10px; }
+  .rrg-groups .row .badge { flex-shrink: 0; }
+  .rrg-groups .etfs { color: var(--ink); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .rrg-groups .etfs .muted { color: var(--muted); }
+  .rrg-groups .empty { color: var(--muted); font-style: italic; }
+
+  /* Stage gallery: one card per ETF, ONE PER ROW at every width. These are
+     verification charts — you have to read the MA against the price and the
+     band boundaries against the turns. Do not add a multi-column breakpoint. */
+  .gallery { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  .g-card { border: 1px solid var(--line); border-radius: var(--radius);
+            overflow: hidden; background: var(--field); }
+  .g-card .cap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                 padding: 8px 10px; border-bottom: 1px solid var(--line);
+                 background: var(--panel); font-size: 12.5px; }
+  .g-card .cap .sym { font-family: ui-monospace, Menlo, Consolas, monospace;
+                      font-weight: 700; color: var(--ink); }
+  .g-card .cap .name { color: var(--muted); }
+  .g-card .cap .spacer { flex: 1; }
+  .g-card img { display: block; width: 100%; height: auto; background: #ffffff; }
+  .g-card .failed { color: var(--muted); font-size: 12.5px; padding: 26px 12px;
+                    text-align: center; }
+  .g-legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+              margin-bottom: 12px; font-size: 12.5px; color: var(--muted); }
+
+  .foot { color: #6e7681; font-size: 12px; margin-top: 14px; line-height: 1.6; }
+  a { color: var(--accent); }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>VEK<span>TOR</span></h1>
-    <div class="sub">Select a strategy and run a screen.</div>
+    <div class="sub">Market analysis software by Joan Acero.</div>
   </header>
 
   <div class="tabs">
     <button type="button" class="tab" id="tab-screen" aria-pressed="true">Screener</button>
-    <button type="button" class="tab" id="tab-monitor" aria-pressed="false">Market Monitor</button>
+    <button type="button" class="tab" id="tab-monitor" aria-pressed="false">Market monitor (dev)</button>
   </div>
 
+  <!-- ================= MARKET MONITOR ================= -->
   <div id="view-monitor" class="hidden">
     <div class="panel">
-      <div class="legend">Sector selection for Weinstein Stage 1→2 breakouts</div>
+      <div class="legend">Sector rotation — Relative Rotation Graph</div>
+
       <div class="desc">
-        Each SPDR sector ETF is checked on <b>two</b> Weinstein criteria:
-        (1) its own stage on the weekly chart (30W MA + prior trend), and
-        (2) Mansfield RS vs SPY.
-        <br><br>
-        <span class="badge st-hunt">hunt</span>
-        &nbsp;sector in Stage 2 <em>and</em> RS &gt; 0 — leadership confirmed,
-        tailwind in place. Hunt Stage 1→2 stock breakouts here.
-        <br>
-        <span class="badge st-watch">watch</span>
-        &nbsp;sector in Stage 1 <em>and</em> RS turning up — early rotation, not
-        yet actionable but component leaders may lead the sector out.
-        <br>
-        <span class="badge st-avoid">avoid</span>
-        &nbsp;Stage 3, Stage 4, or no RS momentum. Countertrend risk.
+        <p>
+          The 11 SPDR sector ETFs plotted against SPY. Sectors are listed below the
+          chart in <b>hunting order</b>: Stage 2 first, then Stage 1, then Stage 3,
+          then Stage 4 — and within each stage, by relative momentum.
+        </p>
+        <p>
+          Stage comes from each ETF's <b>own</b> weekly chart. The plot position comes
+          from its performance <b>relative to SPY</b>. Those are different questions,
+          and a sector can look good on one and bad on the other.
+        </p>
       </div>
-      <button id="load-rotation" class="run">Scan sector rotation</button>
-      <div id="monitor-status" class="muted" style="margin-top:10px"></div>
+
+      <details class="doc">
+        <summary>What the two axes mean</summary>
+        <div class="doc-body">
+          <p>
+            <b>x — JdK RS-Ratio (relative trend).</b> Where the sector <i>is</i> versus
+            SPY. Above 100 means outperforming. It is heavily smoothed (10-week average
+            of the price relative, then normalised over 40 weeks), so it is stable and
+            slow. By construction it crosses 100 <i>late</i>: the sector has already
+            been outperforming for weeks by the time the line moves through the axis.
+          </p>
+          <p>
+            <b>y — JdK RS-Momentum (rate of change of the x-axis).</b> Where the sector
+            is <i>going</i>. It is the 4-week rate of change of RS-Ratio, normalised the
+            same way, and it is deliberately left unsmoothed — so it turns early and it
+            crosses 100 often. Early and noisy are the same property.
+          </p>
+          <p>
+            The two axes are <b>not independent</b>. The y-axis is computed from the
+            x-axis. You are looking at the level and the slope of one quantity, not at
+            two separate measurements. Practically: <b>x is what you get paid on, y is
+            what tells you when.</b>
+          </p>
+        </div>
+      </details>
+
+      <details class="doc">
+        <summary>How to read the plot</summary>
+        <div class="doc-body">
+          <p>
+            <b>Quadrants.</b> Axes cross at 100.
+            <span class="badge q-leading">leading</span> outperforming and still
+            accelerating ·
+            <span class="badge q-weakening">weakening</span> still ahead but losing
+            steam ·
+            <span class="badge q-lagging">lagging</span> behind and still falling back ·
+            <span class="badge q-improving">improving</span> behind but turning up.
+          </p>
+          <p>
+            <b>Rotation is clockwise:</b> leading → weakening → lagging → improving →
+            leading. A sector moving anticlockwise is not rotating, it is stalling.
+          </p>
+          <p>
+            <b>Tails</b> are the last 12 weeks, oldest thin and faint, newest thick and
+            solid. Tail colour is the quadrant the tail <i>ends</i> in; tail thickness is
+            distance from the 100/100 crosshair.
+          </p>
+          <p>
+            <b>Read direction, not position.</b> A sector sitting in <i>improving</i> and
+            travelling up-and-right is converting to leadership. The same sector
+            travelling up-and-<i>left</i> is drifting further from the benchmark and,
+            under clockwise rotation, will most likely loop back into lagging without
+            ever converting.
+          </p>
+          <p>
+            <b>For Stage 1→2 hunting</b>, the highest-value event is RS-Ratio crossing
+            <b>above 100</b> — the improving→leading conversion, flagged in the Cross
+            column.
+          </p>
+          <div class="caveat">
+            <p><b>Two things this plot cannot tell you.</b></p>
+            <p>
+              1. Everything here is <b>relative</b>. A sector can sit in <i>improving</i>
+              simply because it is falling more slowly than SPY. That is why the Stage
+              column exists and why the table is ordered by it rather than by quadrant.
+            </p>
+            <p>
+              2. Each sector is normalised against <b>its own</b> 40-week history, so a
+              low-volatility sector shows large RS deviations for small relative moves.
+              Quadrant membership and direction of travel are comparable across sectors;
+              the decimal values are not.
+            </p>
+          </div>
+        </div>
+      </details>
+
+      <details class="doc">
+        <summary>How the stage is calculated</summary>
+        <div class="doc-body">
+          <p>
+            One function — <code>classify()</code> in <code>src/stages.py</code> —
+            used by the sector monitor, the Weinstein strategy and every chart in
+            the framework. It reads the security's <b>own</b> weekly closes; no
+            relative strength is involved.
+          </p>
+          <ul>
+            <li><b>MA30</b>, the 30-week average, is the <b>decision</b> line.
+                <b>MA10</b>, the 10-week average — which is the 50-day average
+                — is the <b>warning</b> line.</li>
+            <li>Transitions fire on the week their trigger is true. There is no
+                confirmation delay: the break of the 30-week MA <i>is</i> the
+                signal, and a label that arrives weeks later is worse than
+                useless.</li>
+          </ul>
+          <table class="cycle">
+            <tr><td>1 → 2</td><td>close above MA30 and MA30 rising</td></tr>
+            <tr><td>1 → 4</td><td>close below MA30 and MA30 falling</td></tr>
+            <tr><td>2 → 4</td><td>close below MA30</td></tr>
+            <tr><td>2 → 3</td><td>close below MA10</td></tr>
+            <tr><td>3 → 4</td><td>close below MA30</td></tr>
+            <tr><td>3 → 2</td><td>close back above MA10 and MA30 rising</td></tr>
+            <tr><td>4 → 1</td><td>close back above MA10 and MA30 not falling</td></tr>
+          </table>
+          <p>
+            The fast line governs the warnings (2→3, 4→1); the slow line
+            governs the commitments (3→4, 1→2, 2→4). Stage 3 means <b>the
+            advance is not confirmed right now</b>, not "topping" — so it is
+            common, transient, and 3→2 is a normal event.
+          </p>
+          <div class="caveat">
+            <p>
+              The ±0.5% band, the 3-week confirmation and the 15% prior-decline
+              threshold are calibration choices, not Weinstein's numbers.
+            </p>
+          </div>
+        </div>
+      </details>
+
+      <button id="load-rotation" class="run" type="button">Scan sector rotation</button>
+      <div id="monitor-status"></div>
 
       <div id="rrg-wrap" class="hidden" style="margin-top:18px">
-        <div class="legend">Money-flow plot — where each sector is going</div>
-        <div class="desc" style="margin-bottom:10px">
-          Each circle is a sector's current (RS, RS slope); the fading tail is
-          the last 8 weeks. <b>Position</b> is RS vs slope only —
-          <b>color</b> is the Weinstein state, which also uses the sector's
-          own stage (not on the plot). So a circle in the "leading" corner
-          can still be <em>avoid</em> if the sector itself is topping.
-          The list under the plot spells out which is which.
-        </div>
         <div id="rrg-plot"></div>
         <div id="rrg-groups" class="rrg-groups"></div>
+        <div class="foot">
+          This is the same image the daily Telegram job sends — rendered once by
+          <code>notifications/rotation_chart.py</code>, never redrawn in the browser.
+          Full-width view at <a href="/rrg">/rrg</a>.
+        </div>
       </div>
 
       <div id="rotation-wrap" class="hidden" style="margin-top:22px">
-        <div class="legend">Ranked sectors</div>
-        <table id="rotation-table" class="tbl"></table>
-      </div>
-
-      <div id="history-wrap" class="hidden" style="margin-top:22px">
-        <div class="legend">State history — when did each sector change?</div>
+        <div class="legend">Sectors — hunting order</div>
         <div class="desc">
-          State week by week (oldest → newest). <b>HN</b>=hunt,
-          <b>WT</b>=watch, <b>AV</b>=avoid. A sector that flipped to <b>HN</b>
-          recently is a <i>fresh</i> hunting ground — its leaders are likely
-          still near the 30W MA, so breakouts are still entrable. Hover a cell
-          for the date.
+          Stage 2 → Stage 1 → Stage 3 → Stage 4, then by RS-Momentum within each stage.
+          <b>Stage 2</b> sectors have the tailwind already blowing; <b>Stage 1</b> sectors
+          are basing, so their leaders may break out first.
         </div>
-        <div class="scroll"><table id="history-table" class="tbl"></table></div>
+        <div class="scroll"><table id="rotation-table"></table></div>
       </div>
+
+      <div id="gallery-wrap" class="hidden" style="margin-top:22px">
+        <div class="legend">Stage check — every sector ETF, coloured by stage</div>
+        <div class="desc">
+          Weekly close and 30W MA on bands coloured by the stage the classifier
+          assigned to <b>that week</b>. The point is verification: a wrong rule shows
+          up as an obviously mislabelled stretch of chart.
+        </div>
+        <div class="g-legend" id="stage-legend"></div>
+        <div class="gallery" id="stage-gallery"></div>
+      </div>
+
     </div>
   </div>
 
+  <!-- ================= SCREENER ================= -->
   <div id="view-screen">
-  <div class="panel">
-    <div class="legend">Strategy</div>
-    <div class="field">
-      <select id="strategy"></select>
-    </div>
-    <div id="strategy-desc" class="desc"></div>
-    <div id="params"></div>
-  </div>
 
-  <div class="panel">
-    <div class="legend">Market</div>
-    <div class="field">
-      <div class="seg" role="group" aria-label="Market mode">
-        <button type="button" id="mode-us" aria-pressed="true">US (Finviz)</button>
-        <button type="button" id="mode-intl" aria-pressed="false">International</button>
-      </div>
-    </div>
-
-    <div id="us-opts">
-      <div class="field">
-        <div class="name">Source</div>
-        <select id="us_source">
-          <option value="industries">Industries (≈150 fine groups)</option>
-          <option value="sectors">Sectors (≈11 broad groups)</option>
-          <option value="rotation">Rotation (Weinstein-selected sectors)</option>
-          <option value="ticker">Ticker (check specific stocks)</option>
-        </select>
+    <div class="cols">
+      <div class="panel">
+        <div class="legend">Strategy</div>
+        <div class="field"><select id="strategy"></select></div>
+        <div id="strategy-desc" class="desc"></div>
+        <div id="params"></div>
       </div>
 
-      <div class="grid" id="rank-opts">
+      <div class="panel">
+        <div class="legend">Target</div>
         <div class="field">
-          <div class="name" id="topn-label">Top industries</div>
-          <input type="number" id="top_n" value="0" min="0" max="50" step="1">
-          <div class="help">How many top-ranked groups to scan. 0 = full market.</div>
+          <div class="seg" role="group" aria-label="Target market">
+            <button type="button" id="mode-us" aria-pressed="true">US</button>
+            <button type="button" id="mode-intl" aria-pressed="false">International</button>
+          </div>
         </div>
-        <div class="field">
-          <div class="name">Performance window</div>
-          <select id="perf_col">
-            <option value="Perf Week">Week</option>
-            <option value="Perf Quart">Quarter</option>
-          </select>
-          <div class="help">Ranking period.</div>
-        </div>
-      </div>
 
-      <div class="field hidden" id="ticker-opts">
-        <div class="name">Tickers</div>
-        <input type="text" id="us_tickers" placeholder="e.g. RACE, ATKR, BMY">
-        <div class="help">Comma-separated. Charts the detected base for each, even if no setup matches.</div>
+        <div id="us-opts">
+          <div class="field">
+            <div class="name">Source</div>
+            <select id="us_source">
+              <option value="index">Index</option>
+              <!-- Label replaced on boot from quality_labels.us -->
+              <option value="quality" data-quality="us">Quality</option>
+              <option value="sectors">Sectors</option>
+              <option value="industries">Industries</option>
+              <option value="ticker">Ticker</option>
+              <option value="rotation">Rotation (RRG-selected sectors)</option>
+            </select>
+            <div class="help hidden" id="us-quality-help">
+              The fund's own daily holdings file — roughly 125 US large- and
+              mid-caps screened for return on equity, earnings stability and low
+              debt. Membership changes only at the semi-annual rebalance.
+            </div>
+          </div>
+
+          <!-- Index checkboxes. Options come from src/indices.py. -->
+          <div class="field hidden" id="index-opts">
+            <div class="name">Indices</div>
+            <div class="grid" id="us-indices"></div>
+            <div class="help">
+              Constituents come from each index's Wikipedia table, with GICS sector
+              per name. Overlap is deduplicated, so selecting several costs nothing.
+            </div>
+          </div>
+
+          <!-- Named-group picker. Options are fetched from Finviz on demand. -->
+          <div class="field hidden" id="group-opts">
+            <div class="name" id="group-label">Which sector</div>
+            <select id="us_group">
+              <option value="">Top-ranked by performance</option>
+            </select>
+            <div class="help" id="group-help">
+              Keep “Top-ranked” to scan the best groups by the ranking below, or pick
+              one to scan it directly.
+            </div>
+          </div>
+
+          <div class="grid hidden" id="rank-opts">
+            <div class="field">
+              <div class="name" id="topn-label">Top industries</div>
+              <input type="number" id="top_n" value="0" min="0" max="50" step="1">
+              <div class="help">How many top-ranked groups to scan. 0 scans all of them.</div>
+            </div>
+            <div class="field">
+              <div class="name">Rank by</div>
+              <select id="perf_col">
+                <option value="Perf Week">Perf Week</option>
+                <option value="Perf Month">Perf Month</option>
+                <option value="Perf Quart">Perf Quart</option>
+                <option value="Perf Half">Perf Half</option>
+                <option value="Perf Year">Perf Year</option>
+              </select>
+              <div class="help">Finviz performance column used to rank groups.</div>
+            </div>
+          </div>
+
+          <div class="field hidden" id="ticker-opts">
+            <div class="name">Tickers</div>
+            <input type="text" id="us_tickers" placeholder="UBER, SONY, PFE">
+            <div class="help">
+              Comma-separated. You get the detected base drawn even when the setup does
+              not match, so you can see why.
+            </div>
+          </div>
+        </div>
+
+        <div id="intl-opts" class="hidden">
+          <div class="field">
+            <div class="name">Source</div>
+            <select id="intl_source">
+              <option value="indices">Index constituents</option>
+              <!-- Label replaced on boot from quality_labels.intl -->
+              <option value="quality" data-quality="intl">Quality</option>
+            </select>
+            <div class="help hidden" id="intl-quality-help">
+              Pan-European by construction, so the market list below does not apply
+              to the universe — it only decides which benchmark the regime gate uses.
+            </div>
+          </div>
+
+          <div class="field" id="intl-markets">
+            <div class="name">Markets</div>
+            <div class="grid" id="mkts"></div>
+            <div class="help">Constituents are fetched live from Wikipedia; a market whose page fails is skipped and logged.</div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div id="intl-opts" class="hidden">
-      <div class="field">
-        <div class="name">Markets</div>
-        <div class="mkts" id="mkts"></div>
-        <div class="help">None selected = all markets.</div>
+    <div class="panel">
+      <button id="run" class="run" type="button">Run screen</button>
+      <div id="status"></div>
+      <div class="summary hidden" id="summary"></div>
+    </div>
+
+    <div id="results" class="panel hidden">
+      <div class="legend">Setups — <span id="count">0</span> chart(s)</div>
+
+      <div class="sortbar" id="sortbar">
+        <span class="lbl">Order by</span>
+        <select id="sort-col" aria-label="Order charts by"></select>
+        <button type="button" class="dir" id="sort-dir" aria-label="Toggle sort direction">↑ ascending</button>
+        <span class="hint" id="sort-hint"></span>
+      </div>
+
+      <div class="viewer" id="viewer">
+        <div class="vbar">
+          <button type="button" class="nav" id="prev" aria-label="Previous chart">←</button>
+          <span class="pos" id="pos">0 / 0</span>
+          <button type="button" class="nav" id="next" aria-label="Next chart">→</button>
+          <span class="who" id="vlabel"></span>
+          <span class="key" id="vkey"></span>
+          <span class="spacer"></span>
+          <span class="keys">← → or click the chart</span>
+        </div>
+        <div class="vimg" id="vimg"></div>
+      </div>
+
+      <div class="foot">
+        Every chart shows the last two years of weekly bars. The full results table
+        is written to <code>results/&lt;strategy&gt;_setups.csv</code> on each run.
       </div>
     </div>
   </div>
-
-  <div class="panel">
-    <label class="check">
-      <input type="checkbox" id="make_charts">
-      <span>Generate PNG charts (slower; written to <span class="muted">results/</span>)</span>
-    </label>
-  </div>
-
-  <button class="run" id="run">Run screen</button>
-  <div id="status"></div>
-
-  <div id="results" class="panel hidden">
-    <div class="legend"><span id="count"></span> result(s)</div>
-    <div class="scroll"><table id="table"></table></div>
-    <div class="charts" id="charts"></div>
-  </div>
-  </div><!-- /view-screen -->
 </div>
 
 <script>
-const $ = (id) => document.getElementById(id);
-let SCHEMA = null;
+"use strict";
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
+
+let STRATEGIES = [];
+let INTL = [];
 let mode = "us";
 
-// ---------- Screener boot ----------
-async function boot() {
-  const res = await fetch("/api/strategies");
-  SCHEMA = await res.json();
+// ---------- Quadrant vocabulary ----------
+// Mirrors src/rotation.py. Ordered leading -> improving -> weakening -> lagging,
+// which is the ranking order sector_rotation() itself returns.
+const QUAD_ORDER = ["leading", "improving", "weakening", "lagging"];
+const QUAD_CLASS = { leading: "q-leading", improving: "q-improving",
+                     weakening: "q-weakening", lagging: "q-lagging" };
 
+// Mirrors Stage.label / Stage.slug in src/stages.py.
+const STAGE_LABEL = { stage1: "1 · base", stage2: "2 · advance",
+                      stage3: "3 · top", stage4: "4 · decline",
+                      unknown: "unknown" };
+const STAGE_CLASS = { stage1: "stage1", stage2: "stage2", stage3: "stage3",
+                      stage4: "stage4", unknown: "stageunknown" };
+
+// Hunting order comes from `hunt_rank`, which src/rotation.py gets from
+// hunt_rank() in src/stages.py. NOT redefined here.
+const huntRank = s => (s.hunt_rank ?? 9);
+
+function sortForHunting(sectors) {
+  return [...sectors].sort((a, b) =>
+    huntRank(a) - huntRank(b) ||
+    (b.rs_momentum ?? -Infinity) - (a.rs_momentum ?? -Infinity));
+}
+
+// ---------- Boot ----------
+
+async function boot() {
   $("tab-screen").addEventListener("click", () => switchTab("screen"));
   $("tab-monitor").addEventListener("click", () => switchTab("monitor"));
-  $("load-rotation").addEventListener("click", loadRotation);
-
-  const sel = $("strategy");
-  SCHEMA.strategies.forEach(s => {
-    const o = document.createElement("option");
-    o.value = s.key; o.textContent = s.display_name;
-    sel.appendChild(o);
-  });
-  sel.addEventListener("change", renderParams);
-  renderParams();
-
-  const mk = $("mkts");
-  SCHEMA.intl_markets.forEach(m => {
-    const l = document.createElement("label");
-    l.innerHTML = `<input type="checkbox" value="${m.code}"> ${m.code} <span class="muted">· ${m.name}</span>`;
-    mk.appendChild(l);
-  });
-
   $("mode-us").addEventListener("click", () => setMode("us"));
   $("mode-intl").addEventListener("click", () => setMode("international"));
-  $("us_source").addEventListener("change", updateUsSource);
-  updateUsSource();
+  $("us_source").addEventListener("change", onUsSourceChange);
+  $("us_group").addEventListener("change", updateUsSource);
+  $("intl_source").addEventListener("change", updateIntlSource);
+  $("strategy").addEventListener("change", renderParams);
   $("run").addEventListener("click", runScreen);
+  $("load-rotation").addEventListener("click", loadRotation);
+  $("sort-col").addEventListener("change", onSortColChange);
+  $("sort-dir").addEventListener("click", toggleSortDir);
+  $("prev").addEventListener("click", () => step(-1));
+  $("next").addEventListener("click", () => step(1));
+  $("summary").addEventListener("click", onSummaryClick);
+  document.addEventListener("keydown", onKey);
+
+  let quality = {}, usIndices = [];
+  try {
+    const res = await fetch("/api/strategies");
+    if (!res.ok) throw new Error("Could not load strategies (HTTP " + res.status + ")");
+    const data = await res.json();
+    STRATEGIES = data.strategies || [];
+    INTL = data.intl_markets || [];
+    quality = data.quality_labels || {};
+    usIndices = data.us_indices || [];
+  } catch (e) {
+    $("status").className = "err";
+    $("status").textContent = e.message;
+    return;
+  }
+
+  // Server order is kept as-is — see the file header.
+  $("strategy").innerHTML = STRATEGIES
+    .map(s => `<option value="${esc(s.key)}">${esc(s.display_name)}</option>`).join("");
+  $("mkts").innerHTML = INTL.map(m =>
+    `<label class="check"><input type="checkbox" value="${esc(m.code)}">`
+  + `<span>${esc(m.name)}</span></label>`).join("");
+
+  // Index checkboxes, from src/indices.py. The first is pre-checked so the
+  // panel is never in a state that cannot be run; unchecking everything is a
+  // clear error from the server rather than a silent full-market scan.
+  $("us-indices").innerHTML = usIndices.map((ix, i) =>
+    `<label class="check"><input type="checkbox" data-index value="${esc(ix.key)}"`
+  + `${i === 0 ? " checked" : ""}><span>${esc(ix.label)}</span></label>`).join("");
+
+  // The ETF each Quality source reads is named in src/holdings.py, once.
+  document.querySelectorAll("option[data-quality]").forEach(opt => {
+    const label = quality[opt.dataset.quality];
+    if (label) opt.textContent = label;
+  });
+
+  renderParams();
+  onUsSourceChange();
+  updateIntlSource();
 }
 
 function currentStrategy() {
-  const key = $("strategy").value;
-  return SCHEMA.strategies.find(s => s.key === key);
+  return STRATEGIES.find(s => s.key === $("strategy").value) || { params: [], description: "" };
 }
 
 function renderParams() {
-  const box = $("params");
-  box.innerHTML = "";
   const s = currentStrategy();
   $("strategy-desc").textContent = s.description || "";
+
+  const box = $("params");
+  box.innerHTML = "";
   if (!s.params.length) {
-    box.innerHTML = '<div class="help">This strategy has no parameters.</div>';
+    // Weinstein is deliberately parameter-free: a fixed rule set is the point,
+    // not an oversight. Say so rather than showing an empty panel.
+    box.innerHTML = '<div class="help">No parameters — this strategy is a fixed rule set.</div>';
     return;
   }
+
   const grid = document.createElement("div");
   grid.className = "grid";
   s.params.forEach(p => {
     const f = document.createElement("div");
     f.className = "field";
+    const help = p.help ? `<div class="help">${esc(p.help)}</div>` : "";
     if (p.field_type === "bool") {
-      f.innerHTML = `<label class="check"><input type="checkbox" data-param="${p.name}" ${p.default ? "checked":""}><span>${p.name}</span></label>`
-                  + (p.help ? `<div class="help">${p.help}</div>` : "");
+      f.innerHTML = `<label class="check"><input type="checkbox" data-param="${esc(p.name)}" `
+                  + `${p.default ? "checked" : ""}><span>${esc(p.name)}</span></label>` + help;
     } else if (p.field_type === "choice") {
       const opts = (p.choices || []).map(c =>
-        `<option value="${c}" ${c === p.default ? "selected" : ""}>${c}</option>`).join("");
-      f.innerHTML = `<div class="name">${p.name}</div>`
-                  + `<select data-param="${p.name}">${opts}</select>`
-                  + (p.help ? `<div class="help">${p.help}</div>` : "");
+        `<option value="${esc(c)}" ${c === p.default ? "selected" : ""}>${esc(c)}</option>`).join("");
+      f.innerHTML = `<div class="name">${esc(p.name)}</div>`
+                  + `<select data-param="${esc(p.name)}">${opts}</select>` + help;
+    } else if (p.field_type === "text") {
+      f.innerHTML = `<div class="name">${esc(p.name)}</div>`
+                  + `<input type="text" data-param="${esc(p.name)}" value="${esc(p.default)}">` + help;
     } else {
       const step = p.field_type === "float" ? "any" : "1";
-      f.innerHTML = `<div class="name">${p.name}</div>`
-                  + `<input type="number" step="${step}" data-param="${p.name}" value="${p.default}">`
-                  + (p.help ? `<div class="help">${p.help}</div>` : "");
+      f.innerHTML = `<div class="name">${esc(p.name)}</div>`
+                  + `<input type="number" step="${step}" data-param="${esc(p.name)}" `
+                  + `value="${esc(p.default)}">` + help;
     }
     grid.appendChild(f);
   });
   box.appendChild(grid);
+}
+
+function collectParams() {
+  const out = {};
+  currentStrategy().params.forEach(p => {
+    const el = document.querySelector(`[data-param="${p.name}"]`);
+    if (!el) return;
+    out[p.name] = p.field_type === "bool"  ? el.checked
+                : p.field_type === "choice" || p.field_type === "text" ? el.value
+                : p.field_type === "float" ? parseFloat(el.value)
+                : parseInt(el.value, 10);
+  });
+  return out;
 }
 
 function setMode(m) {
@@ -385,60 +844,144 @@ function setMode(m) {
   $("intl-opts").classList.toggle("hidden", m !== "international");
 }
 
+// ---------- Finviz group picker ----------
+// Names are fetched from /api/groups, never listed here: Finviz owns that
+// vocabulary and it changes. Cached per kind for the life of the page.
+
+const GROUPS = { sector: null, industry: null };
+let GROUP_KIND = null;
+
+function groupKind() {
+  const src = $("us_source").value;
+  return src === "sectors" ? "sector" : src === "industries" ? "industry" : null;
+}
+
+async function loadGroups(kind) {
+  const sel = $("us_group");
+  const keep = sel.value;
+
+  const fill = names => {
+    sel.innerHTML = '<option value="">Top-ranked by performance</option>'
+      + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+    // Restore the selection only if it still exists in the new list — a sector
+    // name is not an industry name.
+    sel.value = names.includes(keep) ? keep : "";
+    sel.disabled = false;
+  };
+
+  if (GROUPS[kind]) { fill(GROUPS[kind]); updateUsSource(); return; }
+
+  sel.disabled = true;
+  sel.innerHTML = '<option value="">Loading from Finviz…</option>';
+  try {
+    const res = await fetch(`/api/groups?kind=${kind}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not load the list");
+    GROUPS[kind] = data.groups || [];
+    fill(GROUPS[kind]);
+  } catch (e) {
+    // Degrade to the ranked behaviour rather than blocking the run: the picker
+    // is an optional narrowing, not a prerequisite.
+    sel.innerHTML = '<option value="">Top-ranked by performance</option>';
+    sel.disabled = false;
+    $("group-help").textContent =
+      `Could not load the ${kind} list (${e.message}). Top-ranked still works.`;
+  }
+  updateUsSource();
+}
+
+function onUsSourceChange() {
+  const kind = groupKind();
+  if (kind && kind !== GROUP_KIND) {
+    GROUP_KIND = kind;
+    $("group-label").textContent = kind === "sector" ? "Which sector" : "Which industry";
+    $("group-help").textContent =
+      "Keep “Top-ranked” to scan the best groups by the ranking below, or pick "
+      + "one to scan it directly.";
+    loadGroups(kind);       // calls updateUsSource() when it settles
+    updateUsSource();
+    return;
+  }
+  if (!kind) GROUP_KIND = null;
+  updateUsSource();
+}
+
 function updateUsSource() {
   const src = $("us_source").value;
   const isTicker = src === "ticker";
-  $("rank-opts").classList.toggle("hidden", isTicker);
+  const isIndex = src === "index";
+  const isGrouped = src === "sectors" || src === "industries";
+  const named = isGrouped && $("us_group").value !== "";
+
+  $("index-opts").classList.toggle("hidden", !isIndex);
+  $("group-opts").classList.toggle("hidden", !isGrouped);
+  // The performance ranking chooses WHICH groups to scan. Once you have named
+  // one, it has nothing left to decide, so it goes away rather than sitting
+  // there looking as though it still applies.
+  $("rank-opts").classList.toggle("hidden", !isGrouped || named);
   $("ticker-opts").classList.toggle("hidden", !isTicker);
+  $("us-quality-help").classList.toggle("hidden", src !== "quality");
   $("topn-label").textContent = src === "sectors" ? "Top sectors" : "Top industries";
 }
 
-function collectParams() {
-  const s = currentStrategy();
-  const out = {};
-  s.params.forEach(p => {
-    const el = document.querySelector(`[data-param="${p.name}"]`);
-    if (!el) return;
-    out[p.name] = p.field_type === "bool" ? el.checked
-                : p.field_type === "choice" || p.field_type === "text" ? el.value
-                : p.field_type === "float" ? parseFloat(el.value)
-                : parseInt(el.value, 10);
-  });
-  return out;
+function updateIntlSource() {
+  // The quality fund is pan-European, so the market checkboxes do not select
+  // its universe.
+  const isQuality = $("intl_source").value === "quality";
+  $("intl-quality-help").classList.toggle("hidden", !isQuality);
+  $("intl-markets").classList.toggle("hidden", isQuality);
 }
+
+function switchTab(which) {
+  const screen = which === "screen";
+  $("tab-screen").setAttribute("aria-pressed", screen);
+  $("tab-monitor").setAttribute("aria-pressed", !screen);
+  $("view-screen").classList.toggle("hidden", !screen);
+  $("view-monitor").classList.toggle("hidden", screen);
+}
+
+// ---------- Screener ----------
 
 async function runScreen() {
   const btn = $("run");
   const status = $("status");
   btn.disabled = true;
   status.className = "";
-  status.textContent = "Running… fetching prices and scanning. This can take a minute.";
+  status.textContent = "Running — fetching prices, scanning and drawing charts. This can take a minute.";
+  $("summary").classList.add("hidden");
 
   const usMarket = () => {
     const src = $("us_source").value;
     const m = { mode: "us", us_source: src };
     if (src === "ticker") {
       m.tickers = $("us_tickers").value;
-    } else {
+    } else if (src === "index") {
+      m.indices = [...document.querySelectorAll("#us-indices input:checked")]
+                    .map(c => c.value);
+    } else if (src === "sectors" || src === "industries") {
+      m.group = $("us_group").value;
       m.top_n_industries = parseInt($("top_n").value, 10);
       m.perf_col = $("perf_col").value;
     }
     return m;
   };
 
+  const intlMarket = () => ({
+    mode: "international",
+    intl_source: $("intl_source").value,
+    intl_codes: [...document.querySelectorAll("#mkts input:checked")].map(c => c.value)
+  });
+
   const body = {
     strategy: $("strategy").value,
     params: collectParams(),
-    make_charts: $("make_charts").checked,
-    market: mode === "us"
-      ? usMarket()
-      : { mode: "international",
-          intl_codes: [...document.querySelectorAll("#mkts input:checked")].map(c => c.value) }
+    market: mode === "us" ? usMarket() : intlMarket()
   };
 
   try {
     const res = await fetch("/api/run", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
     const data = await res.json();
@@ -456,288 +999,438 @@ async function runScreen() {
     status.className = "err";
     status.textContent = e.message;
     $("results").classList.add("hidden");
+    $("summary").classList.add("hidden");
   } finally {
     btn.disabled = false;
   }
 }
 
+// ---------- Results: ONE state, ONE sort, ONE chart at a time ----------
+
+let RESULT = { columns: [], rows: [], charts: {}, count: 0 };
+let SORT = { col: null, dir: "asc" };   // col === null  =>  server order
+let SECTORS = new Set();                // empty  =>  no sector filter
+let ITEMS = [];
+let IDX = 0;
+let STAMP = Date.now();                 // cache-buster, fixed per result set
+
+const UNCLASSIFIED = "Unclassified";
+const blank = v => v === null || v === undefined || v === "";
+const colIndex = name => RESULT.columns.indexOf(name);
+
+function rowSector(row) {
+  const i = colIndex("Sector");
+  return (i === -1 || blank(row[i])) ? UNCLASSIFIED : String(row[i]);
+}
+
+// A column is numeric if every non-blank value sampled is a number or boolean.
+// Sampling rather than trusting the header keeps this working for any strategy:
+// nothing here knows that Readiness_Score is a float and Sector is a string.
+function isNumericColumn(idx) {
+  let seen = 0;
+  for (const row of RESULT.rows) {
+    const v = row[idx];
+    if (blank(v)) continue;
+    if (typeof v !== "number" && typeof v !== "boolean") return false;
+    if (++seen >= 25) break;
+  }
+  return seen > 0;
+}
+
+function sortedRows() {
+  if (SORT.col === null) return RESULT.rows;
+  const idx = colIndex(SORT.col);
+  if (idx === -1) return RESULT.rows;
+
+  const numeric = isNumericColumn(idx);
+  const sign = SORT.dir === "asc" ? 1 : -1;
+
+  // Array.prototype.sort is stable, so equal keys keep the server's order:
+  // ordering by Sector groups the sectors and leaves the strategy's own
+  // ranking (e.g. Readiness_Score descending) intact inside each group.
+  return [...RESULT.rows].sort((a, b) => {
+    const x = a[idx], y = b[idx];
+    // Blanks last in BOTH directions. A column populated for only some rows
+    // must not bury the rows that have it.
+    if (blank(x) && blank(y)) return 0;
+    if (blank(x)) return 1;
+    if (blank(y)) return -1;
+    if (numeric) return sign * (Number(x) - Number(y));
+    return sign * String(x).localeCompare(String(y), undefined,
+                                          { numeric: true, sensitivity: "base" });
+  });
+}
+
+function buildSortMenu() {
+  const sel = $("sort-col");
+  sel.innerHTML = '<option value="">Default (strategy order)</option>'
+    + RESULT.columns.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  sel.value = SORT.col || "";
+  updateSortControls();
+}
+
+function updateSortControls() {
+  const dirBtn = $("sort-dir");
+  dirBtn.disabled = SORT.col === null;
+  dirBtn.textContent = SORT.dir === "asc" ? "↑ ascending" : "↓ descending";
+  $("sort-hint").textContent = SORT.col === null
+    ? "As ranked by the strategy."
+    : "Blanks always last. Ties keep the strategy's ranking.";
+  $("sortbar").classList.toggle("hidden", RESULT.count === 0);
+}
+
+function onSortColChange() {
+  const value = $("sort-col").value;
+  SORT.col = value || null;
+  // Numeric columns are almost always "biggest first" questions (score, base
+  // length, RS); text columns are alphabetical.
+  if (SORT.col !== null) {
+    const idx = colIndex(SORT.col);
+    SORT.dir = (idx !== -1 && isNumericColumn(idx)) ? "desc" : "asc";
+  }
+  rebuildItems();
+  updateSortControls();
+}
+
+function toggleSortDir() {
+  if (SORT.col === null) return;
+  SORT.dir = SORT.dir === "asc" ? "desc" : "asc";
+  rebuildItems();
+  updateSortControls();
+}
+
+// ---------- Sector census, which is also the sector filter ----------
+// Sector clustering is itself a signal — twelve names out of one sector is a
+// sector story, not twelve independent ones — so the census is stated before
+// the charts. Making the chips pressable turns that observation into the
+// obvious next action: look at those twelve.
+
+function renderSummary() {
+  const host = $("summary");
+  if (!RESULT.count || !RESULT.rows.length) {
+    host.classList.add("hidden");
+    host.innerHTML = "";
+    return;
+  }
+  const counts = new Map();
+  RESULT.rows.forEach(r => {
+    const key = rowSector(r);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const parts = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+  const chips = parts.map(([name, n]) =>
+    `<button type="button" class="chip" data-sector="${esc(name)}" `
+  + `aria-pressed="${SECTORS.has(name)}">${esc(name)} <b>${n}</b></button>`).join("");
+
+  const note = SECTORS.size
+    ? `<button type="button" class="clear" data-clear="1">show all</button>`
+    : `<span class="note">click a sector to filter</span>`;
+
+  host.innerHTML =
+      `<span class="total"><b>${RESULT.count}</b> stock(s) · `
+    + `${parts.length} sector(s)</span>` + chips + note;
+  host.classList.remove("hidden");
+}
+
+function onSummaryClick(ev) {
+  const clear = ev.target.closest("[data-clear]");
+  if (clear) { SECTORS.clear(); renderSummary(); rebuildItems(); return; }
+  const chip = ev.target.closest("[data-sector]");
+  if (!chip) return;
+  const name = chip.dataset.sector;
+  if (SECTORS.has(name)) SECTORS.delete(name); else SECTORS.add(name);
+  renderSummary();
+  rebuildItems();
+}
+
 function renderResults(data) {
-  const box = $("results");
-  const table = $("table");
-  const gallery = $("charts");
-  const charts = data.charts || {};
-  $("count").textContent = data.count;
-
-  if (data.count) {
-    let html = "<thead><tr>" + data.columns.map(c => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
-    html += data.rows.map(r =>
-      "<tr>" + r.map(v => `<td>${v === null ? '<span class="muted">—</span>' : v}</td>`).join("") + "</tr>"
-    ).join("");
-    html += "</tbody>";
-    table.innerHTML = html;
-  } else {
-    table.innerHTML = "";
-  }
-
-  gallery.innerHTML = "";
-  const shown = new Set();
-  const addCard = (ticker, url) => {
-    if (!url || shown.has(ticker)) return;
-    shown.add(ticker);
-    const card = document.createElement("div");
-    card.className = "chart-card";
-    card.innerHTML = `<div class="cap">${ticker}</div>`
-                   + `<img loading="lazy" alt="Chart for ${ticker}" src="${url}?t=${Date.now()}">`;
-    gallery.appendChild(card);
+  RESULT = {
+    columns: data.columns || [],
+    rows: data.rows || [],
+    charts: data.charts || {},
+    count: data.count || 0
   };
-  const tickerIdx = data.columns.indexOf("Ticker");
-  if (data.count && tickerIdx !== -1) {
-    data.rows.forEach(r => addCard(r[tickerIdx], charts[r[tickerIdx]]));
+  SORT = { col: null, dir: "asc" };
+  SECTORS = new Set();
+  STAMP = Date.now();
+
+  buildSortMenu();
+  renderSummary();
+  rebuildItems();
+
+  $("results").classList.toggle(
+    "hidden", !(RESULT.count || Object.keys(RESULT.charts).length));
+}
+
+// "Name — TICKER — Sector", the same join Instrument.label() performs in
+// src/instrument.py for the chart title itself.
+function rowLabel(row) {
+  const pick = name => {
+    const i = colIndex(name);
+    return i === -1 || blank(row[i]) ? null : String(row[i]);
+  };
+  return [pick("Name"), pick("Ticker"), pick("Sector")].filter(Boolean).join(" — ");
+}
+
+// The ordered list the viewer walks: matched rows, filtered then sorted, then
+// anything charted but absent from the table (ticker mode with no match) —
+// those only when no sector filter is active, since they have no sector to
+// judge them by and silently including them would break the filter's promise.
+function rebuildItems() {
+  const rows = sortedRows().filter(r => !SECTORS.size || SECTORS.has(rowSector(r)));
+  const seen = new Set();
+  ITEMS = [];
+
+  const push = (ticker, url, label, keyText) => {
+    if (!url || !ticker || seen.has(ticker)) return;
+    seen.add(ticker);
+    ITEMS.push({ ticker, url, label: label || ticker, keyText: keyText || "" });
+  };
+
+  const tIdx = colIndex("Ticker");
+  if (RESULT.count && tIdx !== -1) {
+    const sIdx = SORT.col === null ? -1 : colIndex(SORT.col);
+    rows.forEach(r => {
+      const keyText = (sIdx !== -1 && !blank(r[sIdx])) ? `${SORT.col}: ${r[sIdx]}` : "";
+      push(r[tIdx], RESULT.charts[r[tIdx]], rowLabel(r), keyText);
+    });
   }
-  Object.entries(charts).forEach(([ticker, url]) => addCard(ticker, url));
+  if (!SECTORS.size) {
+    Object.entries(RESULT.charts).forEach(([ticker, url]) => push(ticker, url));
+  }
 
-  if (data.count || Object.keys(charts).length) box.classList.remove("hidden");
-  else box.classList.add("hidden");
+  $("count").textContent = SECTORS.size
+    ? `${ITEMS.length} of ${RESULT.count}`
+    : ITEMS.length;
+  IDX = 0;
+  renderViewer();
 }
 
-function switchTab(which) {
-  const screen = which === "screen";
-  $("tab-screen").setAttribute("aria-pressed", screen);
-  $("tab-monitor").setAttribute("aria-pressed", !screen);
-  $("view-screen").classList.toggle("hidden", !screen);
-  $("view-monitor").classList.toggle("hidden", screen);
+function step(delta) {
+  const next = IDX + delta;
+  if (next < 0 || next >= ITEMS.length) return;   // no wrap: the ends mean "done"
+  IDX = next;
+  renderViewer();
 }
 
-// ---------- Market monitor: state color / label maps ----------
+function onKey(ev) {
+  if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+  if ($("view-screen").classList.contains("hidden")) return;
+  if (!ITEMS.length) return;
+  // Don't steal the arrows from a focused form control.
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (["INPUT", "SELECT", "TEXTAREA"].includes(tag)) return;
+  ev.preventDefault();
+  step(ev.key === "ArrowRight" ? 1 : -1);
+}
 
-const STATE_CLASS = { hunt: "st-hunt", watch: "st-watch", avoid: "st-avoid" };
-const STATE_ABBR  = { hunt: "HN",       watch: "WT",       avoid: "AV" };
-// Palette must match the CSS badges above so plot / table / timeline agree.
-const STATE_COLOR = { hunt: "#3fb950", watch: "#2f81f7", avoid: "#6e7681" };
+function renderViewer() {
+  const host = $("vimg");
+  const total = ITEMS.length;
+
+  $("pos").textContent = total ? `${IDX + 1} / ${total}` : "0 / 0";
+  $("prev").disabled = IDX <= 0;
+  $("next").disabled = IDX >= total - 1;
+
+  if (!total) {
+    $("vlabel").textContent = "";
+    $("vkey").textContent = "";
+    host.innerHTML = SECTORS.size
+      ? '<div class="empty">No charts in the selected sector(s).</div>' : "";
+    return;
+  }
+
+  const item = ITEMS[IDX];
+  $("vlabel").textContent = item.label;
+  $("vkey").textContent = item.keyText;
+
+  const img = new Image();
+  img.alt = `Chart for ${item.ticker}`;
+  img.src = `${item.url}?t=${STAMP}`;
+  img.title = "Click for the next chart";
+  img.addEventListener("click", () => step(1));
+  img.onerror = () => {
+    const d = document.createElement("div");
+    d.className = "failed";
+    d.textContent = `Chart for ${item.ticker} did not render.`;
+    img.replaceWith(d);
+  };
+  host.innerHTML = "";
+  host.appendChild(img);
+
+  // Warm the neighbours so stepping is instant rather than a white flash.
+  [IDX + 1, IDX - 1].forEach(i => {
+    if (i >= 0 && i < total) new Image().src = `${ITEMS[i].url}?t=${STAMP}`;
+  });
+}
+
+// ---------- Market monitor ----------
 
 async function loadRotation() {
   const btn = $("load-rotation");
   const status = $("monitor-status");
   btn.disabled = true;
-  status.textContent = "Scanning sector ETFs vs SPY… (downloading weekly data)";
+  status.className = "";
+  status.textContent = "Scanning the 11 sector ETFs against SPY — downloading weekly data.";
   try {
-    const res = await fetch("/api/rotation");
+    // history=0: the quadrant timeline was replaced by the stage gallery,
+    // which needs only the sector list.
+    const res = await fetch("/api/rotation?history=0");
     const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    if (!res.ok || data.error) throw new Error(data.error || "Rotation failed");
     const sectors = data.sectors || [];
     renderRRG(sectors);
     renderRotation(sectors);
-    renderHistory(data.history || { dates: [], sectors: [] });
-    const hunts = sectors.filter(s => s.state === "hunt").length;
-    const watches = sectors.filter(s => s.state === "watch").length;
-    status.textContent = `Done — ${hunts} hunt, ${watches} watch, ${sectors.length - hunts - watches} avoid.`;
+    renderStageGallery(sectors);
+
+    const n = st => sectors.filter(s => s.sector_stage === st).length;
+    status.className = "ok";
+    status.textContent = sectors.length
+      ? `Done — ${n("stage2")} in Stage 2, ${n("stage1")} in Stage 1, `
+        + `${n("stage3")} in Stage 3, ${n("stage4")} in Stage 4.`
+      : "No sector had enough weekly history to plot. Check the log for skipped ETFs.";
   } catch (e) {
-    status.textContent = "Error: " + e.message;
+    status.className = "err";
+    status.textContent = e.message;
   } finally {
     btn.disabled = false;
   }
 }
 
-// ---------- Money-flow plot (RRG-style, pure SVG) ----------
-//
-// Circle = sector at current (RS, RS slope). Trail = last 8 weekly positions,
-// oldest -> newest, fading in opacity / thickness so the current point pops.
-// Symmetric zero-centered axes so the four quadrants read naturally.
-
+// The RRG itself: one <img>, pointing at the Python renderer. Nothing is
+// computed here. See the file header for why this must stay that way.
 function renderRRG(sectors) {
   const wrap = $("rrg-wrap");
   const host = $("rrg-plot");
   if (!sectors.length) { wrap.classList.add("hidden"); return; }
-
-  const W = 520, H = 380;
-  const pad = { top: 24, right: 24, bottom: 40, left: 50 };
-  const iw = W - pad.left - pad.right;
-  const ih = H - pad.top - pad.bottom;
-
-  // Auto-scale symmetric around zero, using both current AND trail points so
-  // trails don't spill outside the plot area.
-  const pts = [];
-  sectors.forEach(s => {
-    pts.push([s.rs, s.rs_slope]);
-    (s.trail || []).forEach(p => pts.push([p.rs, p.rs_slope]));
-  });
-  const rsMax    = Math.max(0.5, ...pts.map(p => Math.abs(p[0]))) * 1.15;
-  const slopeMax = Math.max(0.1, ...pts.map(p => Math.abs(p[1]))) * 1.15;
-
-  const X = v => pad.left + ((v + rsMax) / (2 * rsMax)) * iw;
-  const Y = v => pad.top + (1 - (v + slopeMax) / (2 * slopeMax)) * ih;
-  const x0 = X(0), y0 = Y(0);
-
-  const parts = [
-    `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sector money-flow plot">`,
-    // Plot area
-    `<rect x="${pad.left}" y="${pad.top}" width="${iw}" height="${ih}" fill="#0d1117" stroke="#232a33"/>`,
-    // Zero-axis crosshair (splits into four Weinstein quadrants)
-    `<line x1="${x0}" y1="${pad.top}" x2="${x0}" y2="${pad.top+ih}" stroke="#4a5560" stroke-dasharray="4,3"/>`,
-    `<line x1="${pad.left}" y1="${y0}" x2="${pad.left+iw}" y2="${y0}" stroke="#4a5560" stroke-dasharray="4,3"/>`,
-    // Quadrant labels
-    qLabel(pad.left + iw - 6, pad.top + 12, "end",   "leading ↗"),
-    qLabel(pad.left + 6,      pad.top + 12, "start", "↖ improving"),
-    qLabel(pad.left + 6,      pad.top + ih - 6, "start", "↙ lagging"),
-    qLabel(pad.left + iw - 6, pad.top + ih - 6, "end",   "weakening ↘"),
-    // Axis titles
-    `<text x="${pad.left+iw/2}" y="${H-10}" fill="#8b949e" font-size="11" text-anchor="middle">Mansfield RS →</text>`,
-    `<text x="14" y="${pad.top+ih/2}" fill="#8b949e" font-size="11" text-anchor="middle" transform="rotate(-90 14 ${pad.top+ih/2})">RS slope →</text>`,
-  ];
-
-  // Per-state visual weight. Hunt / watch get a halo so the actionable
-  // sectors pop out of the "avoid" background at a glance; avoid is muted
-  // so it recedes without disappearing (freshness / drift still readable).
-  const styleFor = (state) => {
-    if (state === "hunt")  return { r: 7,   halo: 13, haloAlpha: 0.28,
-                                     circleAlpha: 1.0, labelAlpha: 1.0, labelWeight: 700 };
-    if (state === "watch") return { r: 6,   halo: 10, haloAlpha: 0.22,
-                                     circleAlpha: 1.0, labelAlpha: 1.0, labelWeight: 700 };
-    return                        { r: 4.5, halo: 0,  haloAlpha: 0,
-                                     circleAlpha: 0.65, labelAlpha: 0.7, labelWeight: 500 };
-  };
-
-  // Draw in reverse state priority so hunt sits on top of watch sits on top
-  // of avoid.
-  const order = { avoid: 0, watch: 1, hunt: 2 };
-  const drawOrder = [...sectors].sort((a, b) =>
-    (order[a.state] ?? 0) - (order[b.state] ?? 0));
-
-  drawOrder.forEach(s => {
-    const color = STATE_COLOR[s.state] || "#6e7681";
-    const st = styleFor(s.state);
-    const trail = s.trail || [];
-
-    // Trail: opacity + width taper toward the current position. Avoid trails
-    // are dimmed further so they don't crowd the actionable sectors.
-    const trailBase = s.state === "avoid" ? 0.5 : 1.0;
-    for (let i = 1; i < trail.length; i++) {
-      const t = trail.length > 1 ? i / (trail.length - 1) : 1;
-      const opacity = ((0.12 + 0.55 * t) * trailBase).toFixed(2);
-      const width   = (0.9 + 0.7 * t).toFixed(2);
-      parts.push(
-        `<line x1="${X(trail[i-1].rs)}" y1="${Y(trail[i-1].rs_slope)}" `
-      + `x2="${X(trail[i].rs)}" y2="${Y(trail[i].rs_slope)}" `
-      + `stroke="${color}" stroke-width="${width}" opacity="${opacity}" `
-      + `stroke-linecap="round"/>`
-      );
-    }
-    trail.forEach((p, i) => {
-      const t = trail.length > 1 ? i / (trail.length - 1) : 1;
-      const opacity = ((0.15 + 0.45 * t) * trailBase).toFixed(2);
-      parts.push(`<circle cx="${X(p.rs)}" cy="${Y(p.rs_slope)}" r="1.3" fill="${color}" opacity="${opacity}"/>`);
-    });
-
-    // Current position: halo (only for hunt/watch) + main circle + label.
-    const cx = X(s.rs), cy = Y(s.rs_slope);
-    const wksTxt = (s.weeks_in_state === null || s.weeks_in_state === undefined)
-                    ? "—" : `${s.weeks_in_state}w`;
-    const tip = `${s.sector} (${s.etf})\n`
-              + `state: ${s.state}    stage: ${s.sector_stage}\n`
-              + `RS ${s.rs.toFixed(2)}    slope ${s.rs_slope.toFixed(3)}\n`
-              + `in state: ${wksTxt}`;
-    if (st.halo > 0) {
-      parts.push(`<circle cx="${cx}" cy="${cy}" r="${st.halo}" fill="${color}" opacity="${st.haloAlpha}"/>`);
-    }
-    parts.push(
-      `<circle cx="${cx}" cy="${cy}" r="${st.r}" fill="${color}" `
-    + `stroke="#0e1116" stroke-width="1.4" opacity="${st.circleAlpha}">`
-    + `<title>${tip}</title></circle>`
-    );
-    parts.push(
-      `<text x="${cx + st.r + 3}" y="${cy + 3}" fill="${color}" font-size="10" `
-    + `font-weight="${st.labelWeight}" opacity="${st.labelAlpha}" `
-    + `font-family="ui-monospace,monospace" pointer-events="none">${s.etf}</text>`
-    );
-  });
-
-  parts.push(`</svg>`);
-  host.innerHTML = parts.join("");
-
-  // Grouped ETF list below the plot -- the "which is which" lookup.
-  const groups = { hunt: [], watch: [], avoid: [] };
-  sectors.forEach(s => {
-    if (groups[s.state]) groups[s.state].push(s);
-  });
-  const groupsHost = $("rrg-groups");
-  const rowHTML = (state, label) => {
-    const items = groups[state] || [];
-    const cls = STATE_CLASS[state];
-    const list = items.length
-      ? items.map(s => `<span title="${s.sector} — stage ${s.sector_stage}">${s.etf}<span class="muted"> ${s.sector}</span></span>`)
-             .join(' <span class="muted">·</span> ')
-      : `<span class="empty">none</span>`;
-    return `<div class="row">`
-         + `<span class="badge ${cls}">${label} (${items.length})</span>`
-         + `<span class="etfs">${list}</span></div>`;
-  };
-  groupsHost.innerHTML = rowHTML("hunt", "hunt") + rowHTML("watch", "watch") + rowHTML("avoid", "avoid");
-
   wrap.classList.remove("hidden");
+
+  // Cache-bust: the endpoint sends no-store, but a back/forward cache restore
+  // can still pair last week's image with this week's table.
+  const img = new Image();
+  img.alt = "Sector rotation relative rotation graph";
+  img.src = `/api/rotation/chart.png?t=${Date.now()}`;
+  img.onerror = () => {
+    host.innerHTML = '<div class="placeholder">Chart unavailable — '
+                   + '<code>/api/rotation/chart.png</code> did not render. '
+                   + 'The table below is still current.</div>';
+  };
+  host.innerHTML = "";
+  host.appendChild(img);
+
+  renderRRGGroups(sectors);
 }
 
-function qLabel(x, y, anchor, txt) {
-  return `<text x="${x}" y="${y}" fill="#5d6773" font-size="9.5" text-anchor="${anchor}" font-family="ui-monospace,monospace">${txt}</text>`;
-}
+// Grouped by quadrant, because this list sits directly under the plot and its
+// job is "which dot is which". The stage ordering lives in the table below.
+function renderRRGGroups(sectors) {
+  const groups = {};
+  QUAD_ORDER.forEach(q => { groups[q] = []; });
+  sectors.forEach(s => { if (groups[s.quadrant]) groups[s.quadrant].push(s); });
 
-// ---------- Ranked-sector table ----------
+  $("rrg-groups").innerHTML = QUAD_ORDER.map(q => {
+    const items = groups[q];
+    const list = items.length
+      ? items.map(s => `<span title="${esc(s.sector)} — stage ${esc(s.sector_stage)}">`
+                     + `${esc(s.etf)}<span class="muted"> ${esc(s.sector)}</span></span>`)
+             .join(' <span class="muted">·</span> ')
+      : '<span class="empty">none</span>';
+    return `<div class="row">`
+         + `<span class="badge ${QUAD_CLASS[q]}">${q} (${items.length})</span>`
+         + `<span class="etfs">${list}</span></div>`;
+  }).join("");
+}
 
 function renderRotation(sectors) {
   const wrap = $("rotation-wrap");
   const t = $("rotation-table");
   if (!sectors.length) { wrap.classList.add("hidden"); return; }
 
+  const ranked = sortForHunting(sectors);
+  const num = v => (v === null || v === undefined) ? "—" : Number(v).toFixed(2);
+
   let html = "<thead><tr>"
-           + "<th>Sector</th><th>ETF</th><th>State</th><th>Stage</th>"
-           + "<th>RS</th><th>RS slope</th><th>Fresh cross</th><th>Weeks in state</th>"
-           + "</tr></thead><tbody>";
-  html += sectors.map(s => {
-    const stCls = STATE_CLASS[s.state] || "";
-    const wks = (s.weeks_in_state === null || s.weeks_in_state === undefined)
-                  ? '<span class="muted">—</span>' : `${s.weeks_in_state}w`;
-    return `<tr>`
-      + `<td>${s.sector}</td>`
-      + `<td class="muted">${s.etf}</td>`
-      + `<td><span class="badge ${stCls}">${s.state}</span></td>`
-      + `<td><span class="badge stage-badge">${s.sector_stage}</span></td>`
-      + `<td>${s.rs}</td>`
-      + `<td>${s.rs_slope}</td>`
-      + `<td>${s.rs_crossed_up ? "✓" : ""}</td>`
-      + `<td>${wks}</td>`
-      + `</tr>`;
+           + "<th>Stage</th><th>Sector</th><th>ETF</th><th>Quadrant</th>"
+           + '<th class="num">RS-Mom</th><th class="num">RS-Ratio</th>'
+           + '<th class="num">Dist</th><th>Cross</th><th class="num">Weeks</th>'
+           + "<th>Scan</th></tr></thead><tbody>";
+
+  let prevStage = null;
+  html += ranked.map(s => {
+    const stage = s.sector_stage || "unknown";
+    const isBreak = prevStage !== null && stage !== prevStage;
+    prevStage = stage;
+
+    const wks = (s.weeks_in_quadrant === null || s.weeks_in_quadrant === undefined)
+                  ? '<span class="muted">—</span>' : `${s.weeks_in_quadrant}w`;
+    // ratio_crossed_up/_down are this week's events; quadrant_changed is the
+    // broader "entered this quadrant this week" flag the PNG marks with '<'.
+    const cross = s.ratio_crossed_up   ? '<span style="color:var(--q-leading)">↑ 100</span>'
+                : s.ratio_crossed_down ? '<span style="color:var(--q-lagging)">↓ 100</span>'
+                : s.quadrant_changed   ? '<span class="muted">new quad</span>' : "";
+
+    return `<tr${isBreak ? ' class="stage-break"' : ""}>`
+      + `<td><span class="badge ${STAGE_CLASS[stage] || "stageunknown"}">`
+      + `${esc(STAGE_LABEL[stage] || stage)}</span></td>`
+      + `<td>${esc(s.sector)}</td>`
+      + `<td class="muted">${esc(s.etf)}</td>`
+      + `<td><span class="badge ${QUAD_CLASS[s.quadrant] || ""}">${esc(s.quadrant)}</span></td>`
+      + `<td class="num">${num(s.rs_momentum)}</td>`
+      + `<td class="num">${num(s.rs_ratio)}</td>`
+      + `<td class="num">${num(s.distance)}</td>`
+      + `<td>${cross}</td>`
+      + `<td class="num">${wks}</td>`
+      + `<td><span class="badge state-badge">${esc(s.state)}</span></td>`
+      + "</tr>";
   }).join("");
+
   html += "</tbody>";
   t.innerHTML = html;
   wrap.classList.remove("hidden");
 }
 
-// ---------- State-history timeline ----------
-
-function renderHistory(hist) {
-  const wrap = $("history-wrap");
-  const t = $("history-table");
-  const sectors = hist.sectors || [];
+// Stage gallery. Each image is rendered by notifications/stage_chart.py from
+// src/stages.py — the browser draws no bands and knows no stage rules.
+function renderStageGallery(sectors) {
+  const wrap = $("gallery-wrap");
+  const host = $("stage-gallery");
   if (!sectors.length) { wrap.classList.add("hidden"); return; }
-
-  let html = "<thead><tr><th>Sector</th><th>Now</th><th>Changed</th>"
-           + "<th>State over time (oldest → newest)</th></tr></thead><tbody>";
-  html += sectors.map(s => {
-    const cls = STATE_CLASS[s.current_state] || "";
-    const changed = (s.weeks_in_state === null || s.weeks_in_state === undefined)
-      ? '<span class="muted">no change</span>' : `${s.weeks_in_state}w ago`;
-    const cells = (s.states || []).map((st, i) => {
-      const c = STATE_CLASS[st] || "";
-      const d = (s.dates && s.dates[i]) ? s.dates[i] : "";
-      return `<span class="cell ${c}" title="${d}: ${st}">${STATE_ABBR[st] || "?"}</span>`;
-    }).join("");
-    return `<tr><td>${s.sector} <span class="muted">${s.etf}</span></td>`
-         + `<td><span class="badge ${cls}">${s.current_state}</span></td>`
-         + `<td>${changed}</td>`
-         + `<td><div class="timeline">${cells}</div></td></tr>`;
-  }).join("");
-  html += "</tbody>";
-  t.innerHTML = html;
   wrap.classList.remove("hidden");
+
+  $("stage-legend").innerHTML = "band colour:&nbsp;"
+    + ["stage2", "stage1", "stage3", "stage4"]
+        .map(k => `<span class="badge ${k}">${esc(STAGE_LABEL[k])}</span>`)
+        .join("");
+
+  const stamp = Date.now();
+  host.innerHTML = "";
+  sortForHunting(sectors).forEach(s => {
+    const stage = s.sector_stage || "unknown";
+    const card = document.createElement("div");
+    card.className = "g-card";
+    card.innerHTML =
+        `<div class="cap"><span class="sym">${esc(s.etf)}</span>`
+      + `<span class="name">${esc(s.sector)}</span><span class="spacer"></span>`
+      + `<span class="badge ${STAGE_CLASS[stage] || "stageunknown"}">`
+      + `${esc(STAGE_LABEL[stage] || stage)}</span>`
+      + `<span class="badge ${QUAD_CLASS[s.quadrant] || ""}">${esc(s.quadrant)}</span>`
+      + `</div>`;
+
+    const img = new Image();
+    img.loading = "lazy";
+    img.alt = `${s.etf} weekly chart with stage bands`;
+    img.src = `/api/stage-chart/${encodeURIComponent(s.etf)}.png?t=${stamp}`;
+    img.onerror = () => {
+      const d = document.createElement("div");
+      d.className = "failed";
+      d.textContent = `Chart for ${s.etf} did not render.`;
+      img.replaceWith(d);
+    };
+    card.appendChild(img);
+    host.appendChild(card);
+  });
 }
 
 boot();

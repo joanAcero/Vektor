@@ -58,8 +58,13 @@ def _find_sector_column(df: pd.DataFrame) -> str | None:
 
 
 @lru_cache(maxsize=None)
-def _read_tables(url: str) -> tuple[pd.DataFrame, ...]:
-    """Fetch and cache all tables on a page. Cached per-run by URL."""
+def read_wiki_tables(url: str) -> tuple[pd.DataFrame, ...]:
+    """Fetch and cache all tables on a Wikipedia page, keyed by URL.
+
+    Public because src/market_us.py fetches the S&P 500 list the same way. One
+    function knows how to ask Wikipedia politely (realistic User-Agent) and
+    cache the answer for the run; a second copy would drift on one or both.
+    """
     tables = pd.read_html(url, storage_options=_STORAGE_OPTS)
     return tuple(tables)
 
@@ -86,7 +91,7 @@ def _fetch_one_market(code: str) -> tuple[list[str], dict[str, str], dict[str, s
     market_map: dict[str, str] = {}
     sector_map: dict[str, str] = {}
 
-    tables = _read_tables(cfg.wiki_url)
+    tables = read_wiki_tables(cfg.wiki_url)
     df = _select_table(tables, cfg)
     if df is None:
         log.warning("%s: no constituents table with a ticker column found at %s "

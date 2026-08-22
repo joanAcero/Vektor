@@ -76,6 +76,7 @@ import numpy as np
 import pandas as pd
 
 from src.benchmarks import benchmark_for, get_weekly_close
+from src.stages import classify_last, hunt_rank
 
 log = logging.getLogger(__name__)
 
@@ -178,16 +179,9 @@ QUADRANT_TO_STATE: dict[str, str] = {
     QUAD_LAGGING: "avoid",
 }
 STATES: tuple[str, ...] = ("hunt", "watch", "avoid")
-
-# Weinstein sector-stage classifier (absolute trend, complementary to the
-# purely RELATIVE RRG: a sector can lead a falling market while still being
-# in Stage 4 itself). Retained because the web UI displays it and because
-# relative strength alone cannot tell you that.
-STAGE_SMA_WEEKS = 30
-STAGE_SLOPE_WEEKS = 5
-STAGE_FLAT_SLOPE_PCT = 0.5
-STAGE_PRIOR_OFFSET_WEEKS = 26
-
+STAGE_HUNT_RANK: dict[str, int] = {
+    "stage2": 0, "stage1": 1, "stage3": 2, "stage4": 3, "unknown": 4,
+}
 DEFAULT_HISTORY_WEEKS = 26
 DEFAULT_START_DATE = "2018-01-01"
 
@@ -281,39 +275,6 @@ def _weeks_in_quadrant(quadrants: list[str]) -> int | None:
             return (len(quadrants) - 1) - i
     return None
 
-
-# ------------------------------------------------------------------
-# WEINSTEIN SECTOR STAGE (absolute trend; complements the relative RRG)
-# ------------------------------------------------------------------
-def _sector_stage(weekly_close: pd.Series) -> str:
-    """Stage 1-4 of the sector's OWN weekly chart, same logic family as
-    strategies/weinstein_setup.py. Relative strength cannot express this:
-    a sector can lead a bear market from inside Stage 4."""
-    if len(weekly_close) < STAGE_SMA_WEEKS + STAGE_SLOPE_WEEKS:
-        return "unknown"
-    sma = weekly_close.rolling(STAGE_SMA_WEEKS).mean()
-    if sma.isna().iloc[-1]:
-        return "unknown"
-    last_sma = float(sma.iloc[-1])
-    prior = sma.iloc[-1 - STAGE_SLOPE_WEEKS]
-    if pd.isna(prior) or last_sma == 0:
-        return "unknown"
-    slope_pct = (last_sma - float(prior)) / last_sma * 100.0
-    above = float(weekly_close.iloc[-1]) > last_sma
-
-    if above and slope_pct > STAGE_FLAT_SLOPE_PCT:
-        return "stage2"
-    if (not above) and slope_pct < -STAGE_FLAT_SLOPE_PCT:
-        return "stage4"
-    # Transitional: did the MA arrive here from above (topping -> stage 3)
-    # or from below/sideways after a decline (basing -> stage 1)?
-    ref = sma.iloc[-1 - STAGE_PRIOR_OFFSET_WEEKS] \
-        if len(sma) > STAGE_PRIOR_OFFSET_WEEKS else np.nan
-    if pd.isna(ref):
-        return "unknown"
-    return "stage1" if last_sma < float(ref) else "stage3"
-
-
 # ------------------------------------------------------------------
 # PUBLIC API
 # ------------------------------------------------------------------
@@ -392,7 +353,7 @@ def sector_rotation(loader, *,
         tail_start_rs = float(tail["rs"].iloc[0])
         tail_pct = ((float(last["rs"]) / tail_start_rs - 1.0) * 100.0
                     if tail_start_rs else 0.0)
-
+        stage = classify_last(etf_wk)
         rows.append({
             "etf": etf,
             "sector": sector,
@@ -408,22 +369,14 @@ def sector_rotation(loader, *,
             "ratio_crossed_up": bool(prev_ratio < RRG_ORIGIN <= rs_ratio),
             "ratio_crossed_down": bool(prev_ratio >= RRG_ORIGIN > rs_ratio),
             "tail_pct_change": round(tail_pct, 2),
-            "sector_stage": _sector_stage(etf_wk),
-            "state": QUADRANT_TO_STATE[quadrant],
+            "sector_stage": stage.slug,
+            "hunt_rank": hunt_rank(stage),
             "tail": [
                 {"date": d.strftime("%Y-%m-%d"),
                  "rs_ratio": round(float(r.rs_ratio), 2),
                  "rs_momentum": round(float(r.rs_momentum), 2)}
                 for d, r in tail.iterrows()
-            ],
-            # --- deprecated aliases (origin-centred at 0 instead of 100) ---
-            # The existing web/index.html RRG plot auto-scales symmetrically
-            # around ZERO, so shifting by -100 lets it render a correct RRG
-            # with no JS change. Prefer rs_ratio / rs_momentum in new code.
-            "rs": round(rs_ratio - RRG_ORIGIN, 2),
-            "rs_slope": round(rs_mom - RRG_ORIGIN, 2),
-            "weeks_in_state": weeks_in_quadrant,
-            "rs_crossed_up": bool(prev_ratio < RRG_ORIGIN <= rs_ratio),
+            ]
         })
 
     rows.sort(key=lambda r: (QUADRANT_RANK.get(r["quadrant"], 9),

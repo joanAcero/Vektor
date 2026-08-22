@@ -1,12 +1,17 @@
 # Env variables
 config/secrets.env
 .env
+
+
 # Virtual environment
 vektor-venv/
 
 # IDEA files
 .idea/
 
-
+# Data & Cache
+data/
+results/
+cache/
 
 

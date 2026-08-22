@@ -5,6 +5,17 @@ Wraps finvizfinance for US-market industry/sector data. Ported from the
 original with two changes: print() -> logging, and defensive handling so a
 Finviz schema change degrades gracefully instead of raising KeyError deep in
 the scan (original bug #4).
+
+Ticker detail frames now carry the COMPANY NAME. The screener Overview view has
+always returned it in a column called "Company"; the previous code selected
+["Ticker", "Sector", "Industry"] and threw it away. Keeping it costs no extra
+request.
+
+NAMING COLLISION, worth knowing before editing this file: the GROUP performance
+view (Performance().screener_view(group=...), used by _get_group_top) also has a
+column called "Name", but there it is the SECTOR or INDUSTRY name, not a company.
+The two frames never meet -- _normalise_details is only applied to screener
+results -- but do not "unify" them.
 """
 
 from __future__ import annotations
@@ -21,6 +32,15 @@ _LIQUIDITY_FILTERS = {
     "Market Cap.": "+Small (over $300mln)",
     "Average Volume": "Over 300K",
 }
+
+# The metadata contract for every ticker-detail frame this module returns.
+# src/market_us.py imports this so the shape is declared in exactly one place.
+DETAIL_COLS = ("Ticker", "Name", "Sector", "Industry")
+
+
+def empty_details() -> pd.DataFrame:
+    """An empty frame with the detail contract's columns."""
+    return pd.DataFrame(columns=list(DETAIL_COLS))
 
 
 class FinvizEngine:
@@ -52,6 +72,7 @@ class FinvizEngine:
 
         df[col_target] = df[col_target].apply(self._clean_pct)
         df_sorted = df.sort_values(by=col_target, ascending=False)
+        # "Name" here is the sector/industry name -- see the module docstring.
         return df_sorted["Name"].head(top_n).tolist()
 
     @staticmethod
@@ -83,6 +104,25 @@ class FinvizEngine:
             df["Ticker"] = fixed
         return df
 
+    @staticmethod
+    def _normalise_details(df: pd.DataFrame) -> pd.DataFrame:
+        """Reduce a screener frame to the DETAIL_COLS contract.
+
+        The company name arrives as "Company"; anything the view did not return
+        is created empty, so downstream code can index the columns
+        unconditionally and Instrument.label() just omits what is missing.
+        """
+        if df is None or df.empty:
+            return empty_details()
+        out = df.copy()
+        if "Name" not in out.columns and "Company" in out.columns:
+            out = out.rename(columns={"Company": "Name"})
+        for col in DETAIL_COLS:
+            if col not in out.columns:
+                log.debug("Finviz result had no %r column; filling empty.", col)
+                out[col] = ""
+        return out[list(DETAIL_COLS)]
+
     def _screener_filter(self, filters_dict: dict) -> pd.DataFrame:
         try:
             fs = ScreenerOverview()
@@ -107,44 +147,33 @@ class FinvizEngine:
         return self._get_group_top("Sector", top_n, col_target, "Sectors")
 
     def get_ticker_details_in_sector(self, sector_name: str) -> pd.DataFrame:
-        """Return [Ticker, Sector, Industry] for liquid stocks in a sector."""
+        """Return DETAIL_COLS for liquid stocks in a sector."""
         log.info("Fetching ticker details for sector: %s", sector_name)
         df = self._screener_filter({"Sector": sector_name, **_LIQUIDITY_FILTERS})
-        if df.empty:
-            return pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
-        cols = [c for c in ("Ticker", "Sector", "Industry") if c in df.columns]
-        result = df[cols].copy()
+        result = self._normalise_details(df)
+        if result.empty:
+            return result
         result["Sector"] = sector_name  # normalise
-        if "Industry" not in result.columns:
-            result["Industry"] = ""
         return result
 
     def get_ticker_details_in_industry(self, industry_name: str) -> pd.DataFrame:
-        """Return [Ticker, Sector, Industry] for liquid stocks in an industry."""
+        """Return DETAIL_COLS for liquid stocks in an industry."""
         log.info("Fetching ticker details for industry: %s", industry_name)
         df = self._screener_filter({"Industry": industry_name, **_LIQUIDITY_FILTERS})
-        if df.empty:
-            return pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
-        cols = [c for c in ("Ticker", "Sector", "Industry") if c in df.columns]
-        result = df[cols].copy()
+        result = self._normalise_details(df)
+        if result.empty:
+            return result
         result["Industry"] = industry_name  # normalise
         return result
 
     def get_all_market_details(self) -> pd.DataFrame:
         """
-        Return [Ticker, Sector, Industry] for ALL liquid stocks in the market,
-        without any industry pre-filter. This is the universe for a full-market
-        scan. Note: this can be thousands of names; finvizfinance paginates, so
-        it may take a while and issue many requests.
+        Return DETAIL_COLS for ALL liquid stocks in the market, without any
+        industry pre-filter. This is the universe for a full-market scan. Note:
+        this can be thousands of names; finvizfinance paginates, so it may take
+        a while and issue many requests.
         """
         log.info("Fetching FULL market universe from Finviz (liquidity filters only)...")
-        df = self._screener_filter(dict(_LIQUIDITY_FILTERS))
-        if df.empty:
-            return pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
-        cols = [c for c in ("Ticker", "Sector", "Industry") if c in df.columns]
-        result = df[cols].copy()
-        for missing in ("Sector", "Industry"):
-            if missing not in result.columns:
-                result[missing] = ""
+        result = self._normalise_details(self._screener_filter(dict(_LIQUIDITY_FILTERS)))
         log.info("Full market universe: %d tickers.", len(result))
         return result

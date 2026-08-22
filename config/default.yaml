@@ -48,26 +48,58 @@ strategy_params:
     sma_weeks: 30
     slope_lookback: 4
 
+# The scan TARGET. (The key is still `market:` -- the web UI calls this section
+# the Target, but renaming the key would break every existing config and
+# daily_report.py. See the naming note at the top of src/config.py.)
 market:
-  mode: us                   # us | international
-  source: rotation         # industries | sectors | rotation | ticker
-                              # "industries"/"sectors": rank by raw Finviz performance
-                              #   (top_n_industries / perf_col below).
-                              # "rotation": run the sector money-flow monitor first
-                              #   (src/rotation.py) and scan every liquid ticker in
-                              #   sectors currently in rotation_states below -- this is
-                              #   money-flow-driven selection instead of raw performance
-                              #   ranking.
-  rotation_states: [hunt, watch]   # used when source: rotation. src/rotation.py states:
-                                    # Rotating In | Leading | Neutral | Weakening | Lagging
-  top_n_industries: 10       # 0 = scan FULL market; >0 = only top-N industries.
-  perf_col: Perf Quart        # "Perf Week" or "Perf Quart"
-  intl_codes: []             # e.g. [DE, GB, FR, IT, ES]; empty == all non-US
-                             # (fetched live from Wikipedia, not hardcoded)
+  mode: us
 
+  # US universe. One of:
+  #   index       union of the `indices:` lists below
+  #   quality     iShares MSCI USA Quality Factor ETF holdings (~125 names,
+  #               from the issuer's own daily file; see src/holdings.py)
+  #   sectors     one named sector (`group:`) or the top-N by perf_col
+  #   industries  one named industry (`group:`) or the top-N by perf_col
+  #               (top_n_industries: 0 scans the whole market)
+  #   rotation    sectors currently in the rotation_quadrants below
+  #   ticker      an explicit `tickers:` list, diagnostic mode
+  #
+  # `source: sp500` still works and is translated to index + [sp500], with a
+  # note in the log.
+  source: rotation
+
+  # Constituent lists to union when source: index. Keys come from
+  # src/indices.py::INDICES -- sp500, nasdaq100, dow30, sp600. Overlap is
+  # deduplicated, so listing several costs nothing.
+  indices: ["sp500"]
+
+  # One named Finviz group when source is sectors/industries. Empty means rank
+  # them by perf_col instead. NOT validated against a list: Finviz owns that
+  # vocabulary. An unknown name returns nothing and says so.
+  group: ""
+
+  rotation_quadrants: ["leading", "improving"]
+  top_n_industries: 10       # 0 = scan FULL market; >0 = only top-N groups.
+  perf_col: Perf Quart        # "Perf Week" or "Perf Quart"
+
+  # International universe. One of:
+  #   indices     Wikipedia constituents of the intl_codes below
+  #   quality     iShares Edge MSCI Europe Quality Factor UCITS ETF holdings.
+  #               Pan-European by construction, so intl_codes is NOT consulted
+  #               for the universe -- only for which benchmark the regime gate
+  #               uses.
+  intl_source: indices
+  intl_codes: []             # e.g. [DE, GB, FR, IT, ES]; empty == all non-US
+
+# History handed to the STRATEGY. Not the chart window: charts always show the
+# last 2 years (run.py::CHART_YEARS), trimmed for display after the signals are
+# computed on everything below. Widening this changes the analysis -- the 30W MA
+# warm-up, the prior-decline lookback and weinstein_setup's 156-week cluster
+# window all read it -- and changes nothing about what you see.
+#
+# `chart_start` and `make_charts` were REMOVED; setting either is now an error
+# rather than a silent no-op. See the header of src/config.py.
 data_start: "2020-01-01"
-chart_start: "2021-01-01"
 output_dir: results
-make_charts: true
 strict: false
 cache_max_age_hours: 12

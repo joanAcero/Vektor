@@ -1,74 +1,3 @@
-"""
-weinstein_setup.py
-------------------
-Weinstein Stage-1 detector, pre-breakout, as a FIXED trading system (no
-tunables). Recall-first architecture: catches EARLY bases (UBER/SONY-type,
-price still under a falling-but-decelerating MA), MID bases (Ferrari-type)
-and LONG mature bases (PFE/CPR.MI-type) with one rule set.
-
-Architecture: stabilization first, structure second
-===================================================
-v1-v3 of this file gated the signal on swing-cluster support/resistance
-detection. Production data showed that is the brittle component (levels
-resolved on ~2% of a 1,600-ticker universe) and every downstream condition
-failed mechanically with it. The detection order is now inverted:
-
-TIER 1 (gates -- robust, price-based):
-  * STABILIZATION: the longest trailing window in which weekly closes hold
-    inside a MAX_STAB_WIDTH band. This is the primary Stage-1 evidence; it
-    needs no swing points, no clustering, no tolerance tuning.
-  * PRIOR DECLINE: the stabilization must sit >= MIN_PRIOR_DECLINE below the
-    pre-base peak (within DECLINE_WINDOW_WEEKS). A range without a decline
-    before it is a Stage-3/consolidation, not a Stage 1.
-  * MA SHAPE (union, the recall fix): the 30W MA is either
-      (a) FLAT (slope inside MA_FLAT_BAND), the mature-base case, or
-      (b) FALLING BUT DECELERATING AND CONVERGED: slope above the freefall
-          floor, clearly less steep than MA_DECEL_LOOKBACK weeks ago, and
-          price within MAX_BELOW_MA of the MA. This is the early-base case
-          (UBER, SONY): price bases while the lagging MA is still catching
-          down. A pure "flat MA" rule misses exactly these.
-    In both branches the MA may not be clearly RISING (> MAX_MA_RISE_PCT):
-    that is a stock that already trended up, not a Stage-1 bottom.
-  * NOT BROKEN OUT: no sustained (3 consecutive weekly closes) break above
-    the range top on record more recent than the base itself.
-
-TIER 2 (score + display -- precise when available, never a gate):
-  * Swing-cluster S/R levels, touch counts, volume dry-up/build-up, RS.
-    When clusters resolve they refine the displayed Resistance/Support and
-    add score; when they don't, the stabilization range's high/low stand in,
-    so charts, Distance_to_Breakout and the plotter always have levels.
-
-The precision/recall position (explicit, on record)
-===================================================
-This configuration is deliberately recall-first: it will surface early bases
-that are, at detection time, INDISTINGUISHABLE from pauses in an ongoing
-decline (SONY today is exactly such a chart -- it becomes "a Stage 1" or "a
-Stage-4 pause" only in hindsight). The system's answer to that ambiguity is
-Weinstein's: the stop below support, and the fact that this is a WATCHLIST,
-not a buy signal -- the buy trigger remains the breakout with volume, price
-above a non-declining MA and RS turning up, confirmed by eye. If daily
-candidate volume becomes noise, tighten by RANKING (Readiness_Score floor),
-not by re-tightening gates -- that is what v3 did and it cost PFE/UBER/SONY.
-Expect meaningfully more matches per run than v3 produced; note
-daily_report.py caps photo attachments at MAX_ATTACHMENTS.
-
-Signal semantics
-================
-Signal = 1: "valid Stage-1 stabilization, not yet broken out" -- a watchlist
-certification. Stage column: informational 4-stage classification; any bar
-that signals is labelled Stage 1 by definition (the gates ARE the Stage-1
-test), which also covers the late-Stage-4-transition look of early bases.
-
-Failure modes
-=============
-* < ~LOOKBACK_WEEKS of history (recent IPOs): prior decline unobservable ->
-  fail-closed, never signals.
-* No benchmark injected: RS columns NaN, RS score components 0, one warning
-  logged; signals unaffected.
-* Level windows exclude the current bar (levels are history; the current bar
-  is tested against them).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -78,14 +7,19 @@ import pandas as pd
 
 from src.strategy import Strategy, StrategyMeta
 from src.registry import register
+from src.stages import (MA_FAST_WEEKS, MA_SLOPE_WEEKS, MIN_DECLINE_PCT,
+                        SMA_WEEKS, Stage, classify as classify_stages)
 
 log = logging.getLogger(__name__)
 
 # ======================================================================
 # BOOK CONSTANTS -- explicitly stated by Weinstein. Do not tune.
 # ======================================================================
-SMA_WEEKS = 30              # "La MM30 semanas es ideal para inversores."
-MA_SLOPE_WEEKS = 5          # slope measured over ~1 month of weekly bars
+# SMA_WEEKS (30) and MA_SLOPE_WEEKS (5) are imported from src/stages.py, which
+# owns the 30-week MA and its slope for the whole framework. They are book
+# constants, but they must be book constants in exactly ONE place: the MA this
+# strategy gates on and the MA the stage label is derived from have to be the
+# same series, or a stock can be "Stage 1" and fail the MA-shape gate at once.
 RS_PERIOD_WEEKS = 52        # Mansfield RS zero line = 1-year RP average
 VOL_BREAKOUT_MULT = 2.0     # breakout volume >= 2x ...
 VOL_AVG_WEEKS = 4           # ... the previous 4-week average (weekly chart)
@@ -98,8 +32,9 @@ VOL_BUILDUP_WEEKS = 8       # accumulation window before a breakout
 # ======================================================================
 MIN_STAB_WEEKS = 10         # validity floor for the stabilization. LOW on
                             # purpose (SONY ~18w, UBER ~25w must pass with
-                            # margin); long-term preference lives in the
-                            # SCORE, not in this gate.
+                            # margin). With the score gone, nothing in the
+                            # system prefers a longer base -- Base_Weeks is
+                            # displayed and that judgement is now manual.
 MAX_STAB_WIDTH = 0.40       # close-to-close band that defines "stabilized"
 STAB_OUTLIER_FRAC = 0.05    # bull traps / undershoots are ISOLATED closes
                             # outside the band; up to 1 + 5% of the span may
@@ -125,7 +60,11 @@ STAB_DRIFT_FRAC = 0.4       # a span is RECORDED as a base only if its LSQ
 MAX_LEVEL_WIDTH = 0.50      # high/low width cap on the displayed range
                             # (wicks legitimately run wider than the 40%
                             # close-based band; PFE-type bases hit ~47%)
-MIN_PRIOR_DECLINE = 0.15    # a Stage 1 follows a considerable decline
+MIN_PRIOR_DECLINE = MIN_DECLINE_PCT / 100.0
+                            # "a considerable decline" precedes a Stage 1.
+                            # Derived from src/stages.py so the GATE and the
+                            # stage LABEL cannot drift apart -- they are the
+                            # same test asked by two different callers.
 DECLINE_WINDOW_WEEKS = 260  # peak search window before the base (5y)
 MA_FLAT_BAND = (-1.0, 1.5)  # 5w %-slope band = "flat" (mature-base branch)
 MAX_MA_RISE_PCT = 1.5       # clearly rising MA = already trended, reject
@@ -147,11 +86,10 @@ TOUCH_TOL_MAX = 0.04        # ...and cap
 TOUCH_TOL_VOL_MULT = 0.6    # tolerance = this x median weekly range
 MIN_TOUCH_SEP_WEEKS = 3     # touches closer than this are one test
 BREAKOUT_CONSEC = 3         # sustained break = 3 consecutive weekly closes
-STAGE_TREND_PCT = 0.5       # |slope| beyond this + price side => stage 2/4
-STAGE_FALLBACK_WEEKS = 52   # 1-vs-3 fallback context without a decline obs
-RS_SLOPE_WEEKS = 10         # RS trend column (score + display)
-SCORE_PROX_HORIZON = 30.0   # % below resistance at which proximity = 0
-SCORE_BASE_HORIZON = 78.0   # weeks at which the base-size score saturates
+RS_SLOPE_WEEKS = 10         # RS trend column (display only)
+# STAGE_TREND_PCT and STAGE_FALLBACK_WEEKS used to live here and were
+# duplicated in src/rotation.py with a different fallback window. Both now
+# live in src/stages.py as TREND_SLOPE_PCT and FALLBACK_WEEKS.
 
 
 def _max_consecutive(mask: np.ndarray) -> int:
@@ -193,22 +131,25 @@ class WeinsteinSetup(Strategy):
             "converged onto it -- so it catches early bases while the MA is "
             "still catching down (UBER/SONY-type), mid bases (Ferrari-type) "
             "and long mature bases (PFE-type). Swing-cluster S/R levels, "
-            "touch counts, RS and volume character refine the score and the "
-            "chart but never gate the signal. Rank by Readiness_Score; the "
-            "buy decision stays manual at the breakout."
+            "touch counts, RS and volume character refine the displayed "
+            "levels and the chart but never gate the signal. Listed closest "
+            "to its breakout first; the buy decision stays manual at the "
+            "breakout."
         ),
         signal_column="Signal",
         hit_values=(1,),
         param_schema=(),  # fixed system: one configuration, run consistently
         display_columns=(
-            "Stage", "Readiness_Score", "Resistance", "Support",
+            "Stage", "Resistance", "Support",
             "Range_Width_Pct", "Base_Weeks", "Distance_to_Breakout",
             "Prior_Decline_Pct", "Mansfield_RS", "RS_Slope_10W",
             "Res_Touches", "Sup_Touches", "Vol_Dryup", "Vol_Buildup_8W",
             "Sector", "Industry",
         ),
-        sort_by=("Market", "Readiness_Score"),
-        sort_ascending=(True, False),
+        # One measured quantity, ascending: nearest to triggering first.
+        # Deliberately NOT a composite -- see the module docstring.
+        sort_by=("Market", "Distance_to_Breakout"),
+        sort_ascending=(True, True),
     )
 
     # ---- benchmark injection (for Mansfield relative strength) ------------
@@ -300,7 +241,7 @@ class WeinsteinSetup(Strategy):
         return top, bot
 
     # ------------------------------------------------------------------
-    # TIER 2 -- SWING-CLUSTER LEVELS (score + display refinement only)
+    # TIER 2 -- SWING-CLUSTER LEVELS (display refinement only)
     # ------------------------------------------------------------------
     @staticmethod
     def _effective_tol(highs: np.ndarray, lows: np.ndarray,
@@ -447,7 +388,7 @@ class WeinsteinSetup(Strategy):
         fb_top, fb_bot = self._range_bounds(highs, lows, spans)
         w_df["Base_Weeks"] = spans  # name kept: plotter/report read Base_Weeks
 
-        # ---- TIER 2: cluster levels (score/display refinement) ------------
+        # ---- TIER 2: cluster levels (display refinement) ------------------
         cl = {c: np.full(n, np.nan) for c in
               ("c_res", "c_sup", "c_res_t", "c_sup_t", "tol")}
         for i in range(n):
@@ -490,12 +431,31 @@ class WeinsteinSetup(Strategy):
 
         self._mark_touch_bars(w_df, highs, lows, n)
 
-        # ---- 30W MA and slope --------------------------------------------
-        w_df["SMA_30W"] = w_df["Close"].rolling(window=SMA_WEEKS).mean()
-        w_df["SMA_Slope"] = w_df["SMA_30W"].diff(MA_SLOPE_WEEKS)
-        w_df["SMA_Slope_Pct"] = (w_df["SMA_Slope"] / w_df["SMA_30W"]) * 100
+        # ---- prior decline (fail-closed when unobservable) ----------------
+        # Computed BEFORE the stage classification, which consumes it: this is
+        # the evidence that separates a Stage-1 base from a Stage-3 top, and
+        # this strategy is the only module in the framework that can measure
+        # it (it needs the stabilization span and the OHLC highs).
+        w_df["Prior_Decline_Pct"] = self._prior_decline(highs, res_eff, spans) * 100
 
-        # ---- volume (columns + score; never a gate) -----------------------
+        # ---- 30W MA, slope and stage -- ALL from src/stages.py -------------
+        # One call produces the MA the gates use AND the stage label. There is
+        # no second definition of either anywhere in the framework.
+        st = classify_stages(w_df["Close"],
+                             prior_decline_pct=w_df["Prior_Decline_Pct"])
+        w_df["SMA_30W"] = st["ma"]
+        # The 10W (= 50-day) MA. Not a gate here -- Stage-1 detection must not
+        # use a fast average, because price crosses it constantly inside a
+        # base. It exists so the plotter draws the same warning line the stage
+        # transitions are judged on.
+        w_df["SMA_10W"] = st["ma_fast"]
+        w_df["SMA_Slope"] = w_df["SMA_30W"].diff(MA_SLOPE_WEEKS)  # display only
+        w_df["SMA_Slope_Pct"] = st["slope_pct"]
+        # Near zero => the Stage 1 / Stage 3 label rests on noise. Surfaced so
+        # the chart can say so instead of asserting a coin flip.
+        w_df["Stage_Transition_Margin_Pct"] = st["transition_margin_pct"]
+
+        # ---- volume (columns only; never a gate) --------------------------
         w_df["Vol_Avg_Prev_4W"] = w_df["Volume"].shift(1).rolling(VOL_AVG_WEEKS).mean()
         w_df["Vol_Spike_2x"] = np.where(
             w_df["Volume"] >= VOL_BREAKOUT_MULT * w_df["Vol_Avg_Prev_4W"], 1, 0)
@@ -511,21 +471,19 @@ class WeinsteinSetup(Strategy):
         vol_slope = _rolling_lsq_slope(w_df["Volume"].astype(float), VOL_BUILDUP_WEEKS)
         w_df["Vol_Buildup_8W"] = np.where(vol_slope > 0, 1, 0)
 
-        # ---- prior decline (fail-closed when unobservable) ----------------
-        w_df["Prior_Decline_Pct"] = self._prior_decline(highs, res_eff, spans) * 100
-
         # ---- breakout tracking (sustained breaks only) --------------------
         w_df["Weeks_Since_Breakout"] = self._weeks_since_breakout(
             closes, w_df["Res_Zone_Top"].values, spans)
 
-        # ---- relative strength (score + display) --------------------------
+        # ---- relative strength (display only) -----------------------------
         w_df["Mansfield_RS"] = self._mansfield(w_df)
         w_df["RS_Slope_10W"] = _rolling_lsq_slope(w_df["Mansfield_RS"], RS_SLOPE_WEEKS)
         if self._benchmark_weekly is None and not self._warned_no_benchmark:
             log.warning(
-                "WeinsteinSetup: no benchmark injected -> Mansfield RS is NaN; "
-                "RS score components contribute 0. Signals unaffected. "
-                "Call set_benchmark() (the Screener does this per market).")
+                "WeinsteinSetup: no benchmark injected -> Mansfield RS and "
+                "RS_Slope_10W are NaN in the output table. Signals are "
+                "unaffected (RS never gated anything). Call set_benchmark() "
+                "(the Screener does this per market).")
             self._warned_no_benchmark = True
 
         # ============================ SIGNAL ============================
@@ -579,42 +537,18 @@ class WeinsteinSetup(Strategy):
         signal_arr = signal.fillna(False).values
         w_df["Signal"] = np.where(signal_arr, 1, 0)
 
-        # ---- informational stage classification ---------------------------
-        adv = (close_s > ma) & (slope > STAGE_TREND_PCT)
-        dec = (close_s < ma) & (slope < -STAGE_TREND_PCT)
-        prior_ok = w_df["Prior_Decline_Pct"].notna()
-        declined = prior_ok & cond_prior_decline
-        ma_fb = ma.shift(STAGE_FALLBACK_WEEKS)
-        trans_is_1 = np.where(prior_ok.values, declined.values, (ma < ma_fb).values)
-        unknown = ma.isna() | slope.isna() | (~prior_ok & ma_fb.isna())
-        stage_num = np.select([unknown.values, adv.values, dec.values, trans_is_1],
-                              [0, 2, 4, 1], default=3)
-        # A signalling bar IS the Stage-1 certification: the label must agree
-        # (covers both the late-Stage-4 look of early bases and the
-        # Stage-2-cannot-precede-its-breakout override).
-        stage_num = np.where(signal_arr, 1, stage_num)
+        # ---- stage label ---------------------------------------------------
+        # The classification itself came from src/stages.py above. The ONLY
+        # thing applied here is strategy policy: a signalling bar IS the
+        # Stage-1 certification (the gates ARE the Stage-1 test), so the label
+        # must agree -- this covers the late-Stage-4 look of early bases and
+        # the fact that Stage 2 cannot precede its own breakout. That override
+        # is deliberately NOT in stages.py: it is this strategy's opinion, not
+        # a property of the stage definition, and the sector monitor must not
+        # inherit it.
+        stage_num = np.where(signal_arr, int(Stage.ONE), st["stage"].to_numpy())
         w_df["Stage_Num"] = stage_num
-        w_df["Stage"] = pd.Series(stage_num, index=w_df.index).map(
-            {0: "-", 1: "1", 2: "2", 3: "3", 4: "4"})
-
-        # ======================= READINESS SCORE =======================
-        # Ranking only. Max 100. Long-term preference lives HERE.
-        prox = (1 - w_df["Distance_to_Breakout"].clip(lower=0)
-                / SCORE_PROX_HORIZON).clip(0, 1).fillna(0)
-        base_sz = (w_df["Base_Weeks"] / SCORE_BASE_HORIZON).clip(0, 1).fillna(0)
-        touches = ((w_df["Res_Touches"].clip(0, 3) +
-                    w_df["Sup_Touches"].clip(0, 3)) / 6.0).fillna(0)
-        w_df["Readiness_Score"] = (
-            20.0 * prox                                            # near breakout
-            + 25.0 * base_sz                                       # bigger base
-            + 15.0 * touches                                       # tested levels
-            + 5.0 * (close_s >= ma).astype(float)                  # above the MA
-            + 5.0 * (slope > 0).astype(float)                      # MA turned up
-            + 5.0 * (w_df["Mansfield_RS"] > 0).astype(float)       # RS positive
-            + 10.0 * (w_df["RS_Slope_10W"] > 0).astype(float)      # RS improving
-            + 7.5 * w_df["Vol_Dryup"]                              # base dried up
-            + 7.5 * w_df["Vol_Buildup_8W"]                         # accumulation
-        ).round(1)
+        w_df["Stage"] = [Stage(int(v)).short for v in stage_num]
 
         return w_df
 

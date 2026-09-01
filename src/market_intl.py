@@ -12,12 +12,22 @@ Design notes:
   * Each market is fetched independently and wrapped in try/except, so one
     broken Wikipedia page degrades that single market to an empty list (logged)
     rather than failing the whole run.
-  * Tickers are normalised and suffixed for yfinance (e.g. SAP -> SAP.DE).
+  * Tickers are normalised and suffixed for yfinance (e.g. SAP -> SAP.DE),
+    except where the page already writes the suffix (NESN.SW).
   * sector_map is populated when the page exposes a usable sector/industry
     column; otherwise it falls back to the market name. Sector here is
     best-effort metadata, not a scan filter.
   * This is a SCRAPED source with no API key. It can break when Wikipedia
-    changes a table's layout; when it does, update src/market_config.py hints.
+    changes a table's layout; when it does, update src/market_config.py.
+
+TABLE SELECTION IS BY SHAPE, NOT BY POSITION
+============================================
+Same rule as src/indices.py for the US pages, and for the same reason: these
+pages carry several tables and their order is not stable across edits. A table
+qualifies only if it has one of the market's symbol columns AND at least
+`min_rows` rows; among the qualifying tables the largest wins. A page that
+yields nothing raises a warning naming what was actually found, so a layout
+change reads as a layout change rather than as a market with no setups.
 
 A small in-memory cache avoids re-fetching the same page within one run.
 """
@@ -69,20 +79,32 @@ def read_wiki_tables(url: str) -> tuple[pd.DataFrame, ...]:
     return tuple(tables)
 
 
-def _select_table(tables: tuple[pd.DataFrame, ...], cfg: MarketConfig) -> pd.DataFrame | None:
+def _select_table(tables: tuple[pd.DataFrame, ...],
+                  cfg: MarketConfig) -> pd.DataFrame | None:
+    """The constituents table, identified by SHAPE.
+
+    Qualifies: has a symbol column and at least cfg.min_rows rows. Among the
+    qualifying tables the largest wins -- on these pages the constituents list
+    is the long one and everything that shares its columns (index changes,
+    former members) is short.
     """
-    Choose the constituents table: the first one that contains one of the
-    expected symbol columns. Falls back to the first table mentioning the
-    table_match hint in its columns.
-    """
+    best: pd.DataFrame | None = None
+    too_small = 0
+
     for df in tables:
-        if _pick_column(df, cfg.symbol_cols) is not None:
-            return df
-    if cfg.table_match:
-        for df in tables:
-            if any(cfg.table_match.lower() in str(c).lower() for c in df.columns):
-                return df
-    return None
+        if _pick_column(df, cfg.symbol_cols) is None:
+            continue
+        if len(df) < cfg.min_rows:
+            too_small += 1
+            continue
+        if best is None or len(df) > len(best):
+            best = df
+
+    if best is None and too_small:
+        log.warning("%s: %d table(s) had a symbol column but fewer than %d rows. "
+                    "Either the page was trimmed or min_rows is set too high in "
+                    "src/market_config.py.", cfg.code, too_small, cfg.min_rows)
+    return best
 
 
 def _fetch_one_market(code: str) -> tuple[list[str], dict[str, str], dict[str, str]]:
@@ -94,9 +116,10 @@ def _fetch_one_market(code: str) -> tuple[list[str], dict[str, str], dict[str, s
     tables = read_wiki_tables(cfg.wiki_url)
     df = _select_table(tables, cfg)
     if df is None:
-        log.warning("%s: no constituents table with a ticker column found at %s "
-                    "(Wikipedia layout may have changed). Skipping this market.",
-                    code, cfg.wiki_url)
+        log.warning("%s: no constituents table found at %s (looked for columns "
+                    "%s in %d table(s); the layout has probably changed). "
+                    "Skipping this market.",
+                    code, cfg.wiki_url, cfg.symbol_cols, len(tables))
         return tickers, market_map, sector_map
 
     sym_col = _pick_column(df, cfg.symbol_cols)

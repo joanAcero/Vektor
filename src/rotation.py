@@ -76,8 +76,8 @@ import numpy as np
 import pandas as pd
 
 from src.benchmarks import benchmark_for, get_weekly_close
-from src.stages import classify_last, hunt_rank
-
+from src.stages import Stage, classify_last, hunt_rank
+from src.benchmarks import get_weekly_close, benchmark_for, mansfield_rs
 log = logging.getLogger(__name__)
 
 
@@ -354,6 +354,10 @@ def sector_rotation(loader, *,
         tail_pct = ((float(last["rs"]) / tail_start_rs - 1.0) * 100.0
                     if tail_start_rs else 0.0)
         stage = classify_last(etf_wk)
+        mrs_series = mansfield_rs(etf_wk, index_wk)
+        mansfield = (float(mrs_series.iloc[-1])
+                     if not mrs_series.empty and pd.notna(mrs_series.iloc[-1])
+                     else None)
         rows.append({
             "etf": etf,
             "sector": sector,
@@ -370,6 +374,7 @@ def sector_rotation(loader, *,
             "ratio_crossed_down": bool(prev_ratio >= RRG_ORIGIN > rs_ratio),
             "tail_pct_change": round(tail_pct, 2),
             "sector_stage": stage.slug,
+            "mansfield_rs": round(mansfield, 2) if mansfield is not None else None,
             "hunt_rank": hunt_rank(stage),
             "tail": [
                 {"date": d.strftime("%Y-%m-%d"),
@@ -382,6 +387,94 @@ def sector_rotation(loader, *,
     rows.sort(key=lambda r: (QUADRANT_RANK.get(r["quadrant"], 9),
                              -r["distance"]))
     return rows
+
+def sector_leaders_history(loader, *, weeks_back: int = 6,
+                           start_date: str = DEFAULT_START_DATE) -> dict:
+    """
+    El filtro de Weinstein (Etapa 2 y Mansfield RS > 0) RECALCULADO en cada
+    uno de los últimos `weeks_back` cortes semanales, con el RANGO por RS
+    entre los líderes DE ESA SEMANA (no fijo a los líderes de hoy) -- para
+    ver si alguien que ya era líder ha subido o bajado dentro del grupo, no
+    solo si sigue dentro o fuera.
+
+    RECORTE, NO HISTORIAL GUARDADO -- ver la nota en la versión anterior
+    de esta función sobre por qué esto es exacto y no una aproximación.
+
+        {
+          "weeks": ["2026-07-18", ..., "2026-08-29"],
+          "sectors": [
+            {"etf": "XLK", "sector": "Technology",
+             "trail": [
+               {"is_leader": false, "rank": null, "mansfield_rs": -1.2},
+               ...
+               {"is_leader": true,  "rank": 1,    "mansfield_rs": 6.4}
+             ]},
+            ...
+          ]
+        }
+
+    `rank` es 1-based, solo entre los líderes de ESA semana; None si esa
+    semana no era líder o no había suficiente historial.
+    """
+    benchmark_symbol = benchmark_for("US")
+    index_wk_full = get_weekly_close(loader, benchmark_symbol, start_date=start_date)
+    if index_wk_full is None:
+        log.error("Could not load benchmark %s for leaders history.", benchmark_symbol)
+        return {"weeks": [], "sectors": []}
+
+    cuts = list(range(weeks_back, -1, -1))  # antigua -> hoy
+    weeks: list[str] | None = None
+    # raw[k_index] = list of (etf, sector, mansfield_rs) para los LÍDERES de esa semana
+    raw_leaders_per_week: list[list[tuple[str, str, float]]] = [[] for _ in cuts]
+    per_sector: dict[str, dict] = {}  # etf -> {"sector":.., "trail": [dict,...]}
+
+    for etf, sector in SECTOR_ETFS.items():
+        etf_wk_full = get_weekly_close(loader, etf, start_date=start_date)
+        if etf_wk_full is None:
+            log.warning("No data for %s in leaders history; skipping.", etf)
+            continue
+
+        trail: list[dict] = []
+        these_weeks: list[str] = []
+        skip = False
+        for wi, k in enumerate(cuts):
+            end = len(etf_wk_full) - k
+            if end < RRG_WARMUP_WEEKS:
+                skip = True
+                break
+            etf_wk = etf_wk_full.iloc[:end]
+            index_wk = index_wk_full.reindex(etf_wk.index).dropna()
+
+            stage = classify_last(etf_wk)
+            mrs_series = mansfield_rs(etf_wk, index_wk)
+            mrs = (float(mrs_series.iloc[-1])
+                   if not mrs_series.empty and pd.notna(mrs_series.iloc[-1])
+                   else None)
+            is_leader = stage == Stage.TWO and (mrs or 0) > 0
+            trail.append({"is_leader": is_leader, "rank": None,  # rango se rellena después
+                          "mansfield_rs": round(mrs, 2) if mrs is not None else None})
+            these_weeks.append(etf_wk.index[-1].strftime("%Y-%m-%d"))
+            if is_leader:
+                raw_leaders_per_week[wi].append((etf, sector, mrs))
+
+        if skip:
+            log.warning("%s has insufficient history for a %d-week leaders "
+                        "trail; skipping.", etf, weeks_back)
+            continue
+
+        if weeks is None:
+            weeks = these_weeks
+        per_sector[etf] = {"sector": sector, "trail": trail}
+
+    # Rango por semana: SOLO entre quienes fueron líderes esa semana concreta.
+    for wi, leaders in enumerate(raw_leaders_per_week):
+        leaders_sorted = sorted(leaders, key=lambda t: t[2], reverse=True)
+        for rank, (etf, _sector, _mrs) in enumerate(leaders_sorted, start=1):
+            if etf in per_sector:
+                per_sector[etf]["trail"][wi]["rank"] = rank
+
+    out = [{"etf": etf, **data} for etf, data in per_sector.items()]
+    return {"weeks": weeks or [], "sectors": out}
 
 
 def rotation_history(loader, *,

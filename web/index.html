@@ -34,13 +34,24 @@
   src/holdings.py. The index checkboxes come from src/indices.py via
   us_indices. The sector and industry names come from Finviz via /api/groups.
   A hardcoded copy of any of them would be a second source of truth that goes
-  stale silently. The only literal lists below are the RRG quadrant names and
-  the stage palette, both documented as deliberate mirrors.
+  stale silently. The only literal lists below are the RRG quadrant names,
+  the stage palette and US_MARKET_INDICES's display names — all three
+  documented as deliberate mirrors of a Python dict.
 
   STAGES
   ------
   Every stage decision comes from classify() in src/stages.py. The four hex
   values in --s1..--s4 mirror STAGE_COLOR there; change both together.
+
+  MARKET-STATE SEMAPHORE (Sector Rotation tab, step 1)
+  ------------------------------------------------------
+  Deliberately NOT classify()/Stage: it is a memoryless "close vs 30W MA,
+  MA rising/falling" read, computed by src/benchmarks.py::us_market_states()
+  for each of US_MARKET_INDICES's four ETF proxies (SPY/QQQ/DIA/IWM — total
+  return ETFs, not the "^" price indices, for the same dividend-bias reason
+  documented in src/benchmarks.py's module docstring). MARKET_STATE_META
+  below mirrors the four regime values that function can return
+  (bull/bear/amber_from_bull/amber_from_bear/unknown) — change both together.
 
   MONITOR TABLE AND GALLERY ORDER
   -------------------------------
@@ -83,6 +94,8 @@
   GET  /api/rotation?history=0      -> {sectors:[...]}
   GET  /api/rotation/chart.png      -> the RRG image
   GET  /api/stage-chart/<SYM>.png   -> a weekly chart with stage bands
+  GET  /api/market-state            -> {markets:[{code,name,regime,label,
+                                        benchmark,close,reason}, ...]}
 -->
 <style>
   :root {
@@ -309,8 +322,10 @@
   .stage4 { background: var(--s4); color: #ffffff; }
   .stageunknown { background: var(--field); color: var(--muted); border: 1px solid var(--line); }
   .state-badge { background: var(--field); color: var(--muted); border: 1px solid var(--line); }
-
+  .leaders-empty { color: var(--muted); font-size: 13px; padding: 16px 4px; text-align: center; }
   tr.stage-break td { border-top: 2px solid var(--line); }
+  tr.leader-row { background: color-mix(in srgb, var(--s2) 14%, transparent); }
+  tr.leader-row td:first-child { border-left: 2px solid var(--s2); }
 
   /* RRG image. Same PNG as Telegram — never a browser-side redraw. */
   #rrg-plot { background: var(--field); border: 1px solid var(--line);
@@ -324,7 +339,12 @@
   .rrg-groups .etfs { color: var(--ink); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
   .rrg-groups .etfs .muted { color: var(--muted); }
   .rrg-groups .empty { color: var(--muted); font-style: italic; }
-
+  .trail-cell { text-align: center; font-size: 12px; font-variant-numeric: tabular-nums;
+               font-family: ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; }
+  .trail-cell .rank { color: var(--s2); font-weight: 700; }
+  .trail-cell .rs { color: var(--muted); }
+  .trail-cell.not-leader { color: var(--line); }
+  .trail-new { background: color-mix(in srgb, var(--s2) 14%, transparent); }
   /* Stage gallery: one card per ETF, ONE PER ROW at every width. These are
      verification charts — you have to read the MA against the price and the
      band boundaries against the turns. Do not add a multi-column breakpoint. */
@@ -346,6 +366,38 @@
 
   .foot { color: #6e7681; font-size: 12px; margin-top: 14px; line-height: 1.6; }
   a { color: var(--accent); }
+
+  /* Sector-rotation market-state semaphore, one card per US index. Its own
+     3-colour palette (reusing --q-leading/--q-weakening/--q-lagging, already
+     defined for the RRG quadrants) rather than the 4-colour --s1..--s4 stage
+     palette: this widget answers "¿es seguro cazar?" (3 states) for each
+     index separately, not "which of the four stages is this" — the amber
+     sub-label (correction vs. base), not the colour, carries that distinction. */
+  .market-state-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px; margin-top: 12px;
+  }
+  .market-state {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px 16px; border-radius: var(--radius);
+    border: 1px solid var(--line); font-size: 13.5px;
+  }
+  .market-state-grid .market-state { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .market-state.loading { color: var(--muted); }
+  .market-state .ms-name { font-size: 12px; color: var(--muted);
+                            text-transform: uppercase; letter-spacing: .06em; }
+  .market-state .ms-badge {
+    font-size: 15px; font-weight: 700; letter-spacing: .02em;
+    padding: 4px 12px; border-radius: 20px; color: #fff;
+  }
+  .market-state.state-bull    .ms-badge { background: var(--q-leading); }
+  .market-state.state-bear    .ms-badge { background: var(--q-lagging); }
+  .market-state.state-amber   .ms-badge { background: var(--q-weakening); color: #1a1400; }
+  .market-state.state-unknown .ms-badge { background: var(--muted); }
+  .market-state .ms-bench {
+    font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
+  }
+  .market-state .ms-detail { color: var(--muted); flex-basis: 100%; }
 </style>
 </head>
 <body>
@@ -357,179 +409,90 @@
 
   <div class="tabs">
     <button type="button" class="tab" id="tab-screen" aria-pressed="true">Screener</button>
-    <button type="button" class="tab" id="tab-monitor" aria-pressed="false">Market monitor (dev)</button>
+    <button type="button" class="tab" id="tab-rotation" aria-pressed="false">Rotación sectorial</button>
   </div>
 
-  <!-- ================= MARKET MONITOR ================= -->
-  <div id="view-monitor" class="hidden">
-    <div class="panel">
-      <div class="legend">Sector rotation — Relative Rotation Graph</div>
+  <!-- ================= SECTOR ROTATION ================= -->
+  <div id="view-rotation" class="hidden">
 
+    <div class="panel">
+      <div class="legend">Rotación sectorial</div>
       <div class="desc">
         <p>
-          The 11 SPDR sector ETFs plotted against SPY. Sectors are listed below the
-          chart in <b>hunting order</b>: Stage 2 first, then Stage 1, then Stage 3,
-          then Stage 4 — and within each stage, by relative momentum.
+          <b>Aproximadamente la mitad del movimiento de una acción viene del
+          movimiento de su sector. Por eso, al buscar la próxima compra, es
+          clave limitar la búsqueda a los sectores líderes del momento.</b>
         </p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="legend">Estado del mercado general</div>
+      <div class="desc">
         <p>
-          Stage comes from each ETF's <b>own</b> weekly chart. The plot position comes
-          from its performance <b>relative to SPY</b>. Those are different questions,
-          and a sector can look good on one and bad on the other.
+          Antes de mirar sectores, el mercado en su conjunto tiene que
+          respaldar la operación. Se calculan al entrar en esta página, sobre
+          el S&amp;P 500, el Nasdaq 100, el Dow Jones y el Russell 2000, cada
+          uno contra su propia MA30 semanal. Lo calculamos de la siguiente forma (simple pero efectiva):
+          <ul>
+            <li><b>Alcista</b> — cierre por encima de la MA30 semanal, con la MA30 ascendente.</li>
+            <li><b>Bajista</b> — cierre por debajo de la MA30 semanal, con la MA30 descendente.</li>
+            <li><b>Corrección</b> — ni lo uno ni lo otro ahora mismo, y la última lectura clara fue alcista.</li>
+            <li><b>Formando base</b> — ni lo uno ni lo otro ahora mismo, y la última lectura clara fue bajista.</li>
+          </ul>
         </p>
       </div>
 
-      <details class="doc">
-        <summary>What the two axes mean</summary>
-        <div class="doc-body">
-          <p>
-            <b>x — JdK RS-Ratio (relative trend).</b> Where the sector <i>is</i> versus
-            SPY. Above 100 means outperforming. It is heavily smoothed (10-week average
-            of the price relative, then normalised over 40 weeks), so it is stable and
-            slow. By construction it crosses 100 <i>late</i>: the sector has already
-            been outperforming for weeks by the time the line moves through the axis.
-          </p>
-          <p>
-            <b>y — JdK RS-Momentum (rate of change of the x-axis).</b> Where the sector
-            is <i>going</i>. It is the 4-week rate of change of RS-Ratio, normalised the
-            same way, and it is deliberately left unsmoothed — so it turns early and it
-            crosses 100 often. Early and noisy are the same property.
-          </p>
-          <p>
-            The two axes are <b>not independent</b>. The y-axis is computed from the
-            x-axis. You are looking at the level and the slope of one quantity, not at
-            two separate measurements. Practically: <b>x is what you get paid on, y is
-            what tells you when.</b>
-          </p>
-        </div>
-      </details>
-
-      <details class="doc">
-        <summary>How to read the plot</summary>
-        <div class="doc-body">
-          <p>
-            <b>Quadrants.</b> Axes cross at 100.
-            <span class="badge q-leading">leading</span> outperforming and still
-            accelerating ·
-            <span class="badge q-weakening">weakening</span> still ahead but losing
-            steam ·
-            <span class="badge q-lagging">lagging</span> behind and still falling back ·
-            <span class="badge q-improving">improving</span> behind but turning up.
-          </p>
-          <p>
-            <b>Rotation is clockwise:</b> leading → weakening → lagging → improving →
-            leading. A sector moving anticlockwise is not rotating, it is stalling.
-          </p>
-          <p>
-            <b>Tails</b> are the last 12 weeks, oldest thin and faint, newest thick and
-            solid. Tail colour is the quadrant the tail <i>ends</i> in; tail thickness is
-            distance from the 100/100 crosshair.
-          </p>
-          <p>
-            <b>Read direction, not position.</b> A sector sitting in <i>improving</i> and
-            travelling up-and-right is converting to leadership. The same sector
-            travelling up-and-<i>left</i> is drifting further from the benchmark and,
-            under clockwise rotation, will most likely loop back into lagging without
-            ever converting.
-          </p>
-          <p>
-            <b>For Stage 1→2 hunting</b>, the highest-value event is RS-Ratio crossing
-            <b>above 100</b> — the improving→leading conversion, flagged in the Cross
-            column.
-          </p>
-          <div class="caveat">
-            <p><b>Two things this plot cannot tell you.</b></p>
-            <p>
-              1. Everything here is <b>relative</b>. A sector can sit in <i>improving</i>
-              simply because it is falling more slowly than SPY. That is why the Stage
-              column exists and why the table is ordered by it rather than by quadrant.
-            </p>
-            <p>
-              2. Each sector is normalised against <b>its own</b> 40-week history, so a
-              low-volatility sector shows large RS deviations for small relative moves.
-              Quadrant membership and direction of travel are comparable across sectors;
-              the decimal values are not.
-            </p>
-          </div>
-        </div>
-      </details>
-
-      <details class="doc">
-        <summary>How the stage is calculated</summary>
-        <div class="doc-body">
-          <p>
-            One function — <code>classify()</code> in <code>src/stages.py</code> —
-            used by the sector monitor, the Weinstein strategy and every chart in
-            the framework. It reads the security's <b>own</b> weekly closes; no
-            relative strength is involved.
-          </p>
-          <ul>
-            <li><b>MA30</b>, the 30-week average, is the <b>decision</b> line.
-                <b>MA10</b>, the 10-week average — which is the 50-day average
-                — is the <b>warning</b> line.</li>
-            <li>Transitions fire on the week their trigger is true. There is no
-                confirmation delay: the break of the 30-week MA <i>is</i> the
-                signal, and a label that arrives weeks later is worse than
-                useless.</li>
-          </ul>
-          <table class="cycle">
-            <tr><td>1 → 2</td><td>close above MA30 and MA30 rising</td></tr>
-            <tr><td>1 → 4</td><td>close below MA30 and MA30 falling</td></tr>
-            <tr><td>2 → 4</td><td>close below MA30</td></tr>
-            <tr><td>2 → 3</td><td>close below MA10</td></tr>
-            <tr><td>3 → 4</td><td>close below MA30</td></tr>
-            <tr><td>3 → 2</td><td>close back above MA10 and MA30 rising</td></tr>
-            <tr><td>4 → 1</td><td>close back above MA10 and MA30 not falling</td></tr>
-          </table>
-          <p>
-            The fast line governs the warnings (2→3, 4→1); the slow line
-            governs the commitments (3→4, 1→2, 2→4). Stage 3 means <b>the
-            advance is not confirmed right now</b>, not "topping" — so it is
-            common, transient, and 3→2 is a normal event.
-          </p>
-          <div class="caveat">
-            <p>
-              The ±0.5% band, the 3-week confirmation and the 15% prior-decline
-              threshold are calibration choices, not Weinstein's numbers.
-            </p>
-          </div>
-        </div>
-      </details>
-
-      <button id="load-rotation" class="run" type="button">Scan sector rotation</button>
-      <div id="monitor-status"></div>
-
-      <div id="rrg-wrap" class="hidden" style="margin-top:18px">
-        <div id="rrg-plot"></div>
-        <div id="rrg-groups" class="rrg-groups"></div>
-        <div class="foot">
-          This is the same image the daily Telegram job sends — rendered once by
-          <code>notifications/rotation_chart.py</code>, never redrawn in the browser.
-          Full-width view at <a href="/rrg">/rrg</a>.
-        </div>
-      </div>
-
-      <div id="rotation-wrap" class="hidden" style="margin-top:22px">
-        <div class="legend">Sectors — hunting order</div>
-        <div class="desc">
-          Stage 2 → Stage 1 → Stage 3 → Stage 4, then by RS-Momentum within each stage.
-          <b>Stage 2</b> sectors have the tailwind already blowing; <b>Stage 1</b> sectors
-          are basing, so their leaders may break out first.
-        </div>
-        <div class="scroll"><table id="rotation-table"></table></div>
-      </div>
-
-      <div id="gallery-wrap" class="hidden" style="margin-top:22px">
-        <div class="legend">Stage check — every sector ETF, coloured by stage</div>
-        <div class="desc">
-          Weekly close and 30W MA on bands coloured by the stage the classifier
-          assigned to <b>that week</b>. The point is verification: a wrong rule shows
-          up as an obviously mislabelled stretch of chart.
-        </div>
-        <div class="g-legend" id="stage-legend"></div>
-        <div class="gallery" id="stage-gallery"></div>
+      <div id="market-state-wrap" class="market-state-grid">
+        <div class="market-state loading">Calculando el estado de los mercados…</div>
       </div>
 
     </div>
+
+      <div class="panel">
+      <div class="legend">Sectores líderes (Weinstein)</div>
+      <div class="desc">
+        <p>
+          Weinstein: Comprar solo en sectores que estén en <b>Etapa 2</b> y
+          con <b>fuerza relativa positiva</b> frente al mercado. Este ranking
+          es ese filtro exacto, aplicado a los 11 sectores.
+        </p>
+      </div>
+
+      <div id="sector-leaders-status" class="desc" style="margin-bottom:10px;"></div>
+
+            <div class="scroll">
+        <table id="sector-leaders-table"></table>
+      </div>
+
+      <div class="legend" style="margin-top:20px;">Últimas 6 semanas</div>
+      <div id="sector-leaders-trail-status" class="desc"></div>
+      <div class="scroll">
+        <table id="sector-leaders-trail-table"></table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="legend"> Industrias líderes (O'Neil)</div>
+      <div class="desc">
+        <p>
+          El 20% de las industrias Finviz con mejor fuerza relativa frente al
+          S&amp;P 500, dentro únicamente de los sectores que ya son líderes
+          en el panel anterior. El precio de cada industria es la media
+          equal-weight de sus acciones constituyentes.
+        </p>
+      </div>
+
+      <button type="button" id="calc-industry-leaders" class="run" style="width:auto; padding:8px 20px;">
+        Calcular industrias líderes
+      </button>
+      <div id="industry-leaders-status" class="desc" style="margin-top:10px;"></div>
+
+      <div class="scroll">
+        <table id="industry-leaders-table"></table>
+      </div>
+    </div>
+
   </div>
 
   <!-- ================= SCREENER ================= -->
@@ -718,11 +681,244 @@ function sortForHunting(sectors) {
     (b.rs_momentum ?? -Infinity) - (a.rs_momentum ?? -Infinity));
 }
 
+// ---------- Market state (Sector Rotation, step 1) ----------
+// Mirrors the regime values src/benchmarks.py::market_state_for_symbol() can
+// return. Change both together.
+const MARKET_STATE_META = {
+  bull:            { emoji: "🟢", label: "ALCISTA",       cls: "state-bull" },
+  bear:            { emoji: "🔴", label: "BAJISTA",       cls: "state-bear"},
+  amber_from_bull: { emoji: "🟡", label: "CORRECCIÓN",    cls: "state-amber"},
+  amber_from_bear: { emoji: "🟡", label: "FORMANDO BASE", cls: "state-amber"},
+  unknown:         { emoji: "⚪", label: "SIN DATOS",      cls: "state-unknown" },
+};
+
+async function loadMarketState() {
+  const wrap = $("market-state-wrap");
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="market-state loading">Calculando el estado de los mercados…</div>';
+  try {
+    const res = await fetch("/api/market-state");
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "market-state failed");
+    const markets = data.markets || [];
+    wrap.innerHTML = markets.map(m => {
+      const meta = MARKET_STATE_META[m.regime] || MARKET_STATE_META.unknown;
+      return `<div class="market-state ${meta.cls}">`
+           + `<span class="ms-name">${esc(m.name)}</span>`
+           + `<span class="ms-badge">${meta.emoji} ${meta.label}</span>`
+           + `<span class="ms-bench">${esc(m.benchmark)}`
+           + `${m.close != null ? " — " + m.close.toFixed(2) : ""}</span>`
+           + `<span class="ms-detail">${esc(meta.detail)}</span>`
+           + `</div>`;
+    }).join("");
+  } catch (e) {
+    wrap.innerHTML = `<div class="market-state state-unknown">No se pudo calcular el estado de los mercados: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadSectorLeaders() {
+  const status = $("sector-leaders-status");
+  const table = $("sector-leaders-table");
+  status.textContent = "Calculando sectores líderes…";
+  table.innerHTML = "";
+  try {
+    const res = await fetch("/api/sector-leaders");
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "sector-leaders failed");
+
+    const sectors = data.sectors || [];
+    status.textContent =
+      `${data.leader_count} de ${data.total_sectors} sectores cumplen Etapa 2 + RS > 0 `;
+
+    if (!sectors.length) {
+      table.innerHTML = '<tr><td class="leaders-empty">Sin datos de sectores.</td></tr>';
+      return;
+    }
+
+    const num = v => (v === null || v === undefined) ? "—" : Number(v).toFixed(2);
+
+    table.innerHTML = "<thead><tr>"
+      + "<th>#</th><th>Sector</th><th>Etapa</th>"
+      + '<th class="num">Mansfield RS</th></tr></thead><tbody>'
+      + sectors.map((s, i) => {
+          const stage = s.sector_stage || "unknown";
+          return `<tr class="${s.is_leader ? "leader-row" : ""}">`
+            + `<td class="muted">${i + 1}</td>`
+            + `<td>${esc(s.sector)}</td>`
+            + `<td><span class="badge ${STAGE_CLASS[stage] || "stageunknown"}">`
+            + `${esc(STAGE_LABEL[stage] || stage)}</span></td>`
+            + `<td class="num">${num(s.mansfield_rs)}</td>`
+            + `</tr>`;
+        }).join("")
+      + "</tbody>";
+  } catch (e) {
+    status.textContent = "";
+    table.innerHTML = `<tr><td class="leaders-empty">Error: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function loadSectorLeadersTrail() {
+  const status = $("sector-leaders-trail-status");
+  const table = $("sector-leaders-trail-table");
+  status.textContent = "Calculando el histórico…";
+  table.innerHTML = "";
+  try {
+    const res = await fetch("/api/sector-leaders-history");
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "leaders-history failed");
+
+    const weeks = data.weeks || [];
+    const sectors = data.sectors || [];
+    if (!weeks.length || !sectors.length) {
+      status.textContent = "";
+      table.innerHTML = '<tr><td class="leaders-empty">Historial insuficiente.</td></tr>';
+      return;
+    }
+
+    const lastIdx = weeks.length - 1;
+    const newThisWeek = sectors.filter(s => {
+      const last = s.trail[lastIdx], prev = s.trail[lastIdx - 1];
+      return prev && last.is_leader && !prev.is_leader;
+    });
+    status.textContent = newThisWeek.length
+      ? `${newThisWeek.length} sector(es) nuevo(s) esta semana: `
+        + newThisWeek.map(s => esc(s.sector)).join(", ") + "."
+      : "Sin cambios respecto a la semana anterior.";
+
+    // Orden: líder hoy primero (por rango de hoy, 1 arriba), luego el resto
+    // por nº de semanas como líder.
+    const ranked = [...sectors].sort((a, b) => {
+      const aLast = a.trail[lastIdx], bLast = b.trail[lastIdx];
+      if (aLast.is_leader !== bLast.is_leader) return bLast.is_leader - aLast.is_leader;
+      if (aLast.is_leader && bLast.is_leader) return aLast.rank - bLast.rank;
+      const aCount = a.trail.filter(t => t.is_leader).length;
+      const bCount = b.trail.filter(t => t.is_leader).length;
+      return bCount - aCount;
+    });
+
+    const weekLabel = w => w.slice(5).replace("-", "/");
+    const cell = t => t.is_leader
+      ? `<span class="rank">${t.rank}</span> <span class="rs">RS=${t.mansfield_rs.toFixed(1)}</span>`
+      : "—";
+
+    table.innerHTML = "<thead><tr><th>Sector</th>"
+      + weeks.map(w => `<th class="trail-cell">${esc(weekLabel(w))}</th>`).join("")
+      + "</tr></thead><tbody>"
+      + ranked.map(s => {
+          const last = s.trail[lastIdx], prev = s.trail[lastIdx - 1];
+          const isNew = prev && last.is_leader && !prev.is_leader;
+          return `<tr${isNew ? ' class="trail-new"' : ""}>`
+            + `<td>${esc(s.sector)}${isNew ? ' <span class="badge stage2">nuevo</span>' : ""}</td>`
+            + s.trail.map(t =>
+                `<td class="trail-cell ${t.is_leader ? "" : "not-leader"}">${cell(t)}</td>`).join("")
+            + `</tr>`;
+        }).join("")
+      + "</tbody>";
+  } catch (e) {
+    status.textContent = "";
+    table.innerHTML = `<tr><td class="leaders-empty">Error: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+
+let INDUSTRY_POLL_TIMER = null;
+
+async function checkIndustryLeaders() {
+  const status = $("industry-leaders-status");
+  const table = $("industry-leaders-table");
+  const btn = $("calc-industry-leaders");
+
+  try {
+    const res = await fetch("/api/industry-leaders");
+    const data = await res.json();
+
+        if (data.status === "calculating") {
+      btn.disabled = true;
+      if (data.phase === "fetching_sectors") {
+        status.textContent = `Consultando Finviz: sector ${data.done}/${data.total} `
+          + `(${esc(data.current || "")})…`;
+      } else if (data.phase === "scoring_industries" && data.total > 0) {
+        const eta = data.eta_seconds > 0
+          ? ` — ~${Math.ceil(data.eta_seconds / 60)} min restantes`
+          : "";
+        status.textContent = `Calculando RS: ${data.done}/${data.total} industrias `
+          + `(${esc(data.current || "")})${eta}`;
+      } else {
+        status.textContent = "Calculando…";
+      }
+      if (!INDUSTRY_POLL_TIMER) INDUSTRY_POLL_TIMER = setInterval(checkIndustryLeaders, 3000);
+      return;
+    }
+    if (INDUSTRY_POLL_TIMER) { clearInterval(INDUSTRY_POLL_TIMER); INDUSTRY_POLL_TIMER = null; }
+    btn.disabled = false;
+
+    if (data.status === "not_calculated") {
+      status.textContent = "Sin calcular todavía. Pulsa el botón para lanzarlo.";
+      table.innerHTML = "";
+      return;
+    }
+
+    // status === "ready"
+    const industries = data.industries || [];
+    const ageMin = Math.round((data.age_seconds || 0) / 60);
+    status.textContent = `${industries.length} industria(s) líder — `
+      + `top 20% de ${data.total_candidates} candidatas — calculado hace ${ageMin} min.`;
+
+    if (!industries.length) {
+      table.innerHTML = '<tr><td class="leaders-empty">Sin industrias candidatas (ningún sector líder ahora mismo).</td></tr>';
+      return;
+    }
+
+    table.innerHTML = "<thead><tr><th>#</th><th>Industria</th><th>Sector</th>"
+      + '<th class="num">Fuerza Relativa</th></tr></thead><tbody>'
+      + industries.map((ind, i) => `<tr>`
+          + `<td class="muted">${i + 1}</td>`
+          + `<td>${esc(ind.industry)}</td>`
+          + `<td class="muted">${esc(ind.sector)}</td>`
+          + `<td class="num">${ind.mansfield_rs.toFixed(2)}</td>`
+          + `</tr>`).join("")
+      + "</tbody>";
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  }
+}
+
+async function calculateIndustryLeaders() {
+  const btn = $("calc-industry-leaders");
+  const status = $("industry-leaders-status");
+  btn.disabled = true;
+  status.textContent = "Calculando…";
+
+  // Arranca el polling YA, en paralelo al POST -- no esperamos a que el POST
+  // resuelva para empezar a preguntar por el progreso, porque el POST no
+  // responde hasta que el cálculo entero ha terminado (es síncrono).
+  if (!INDUSTRY_POLL_TIMER) INDUSTRY_POLL_TIMER = setInterval(checkIndustryLeaders, 3000);
+
+  try {
+    const res = await fetch("/api/industry-leaders/calculate", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "calculation failed");
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    btn.disabled = false;
+  } finally {
+    // El POST ya terminó (con éxito o error): el polling deja de tener
+    // sentido salvo que checkIndustryLeaders() decida seguir por su cuenta
+    // (no debería, porque running ya es false en el servidor).
+    if (INDUSTRY_POLL_TIMER) { clearInterval(INDUSTRY_POLL_TIMER); INDUSTRY_POLL_TIMER = null; }
+    checkIndustryLeaders();  // repinta con el resultado final ya disponible
+  }
+}
 // ---------- Boot ----------
 
 async function boot() {
+  loadMarketState();
+  loadSectorLeaders();
+  loadSectorLeadersTrail();
+  checkIndustryLeaders();
+  $("calc-industry-leaders").addEventListener("click", calculateIndustryLeaders);
   $("tab-screen").addEventListener("click", () => switchTab("screen"));
-  $("tab-monitor").addEventListener("click", () => switchTab("monitor"));
+  $("tab-rotation").addEventListener("click", () => switchTab("rotation"));
   $("mode-us").addEventListener("click", () => setMode("us"));
   $("mode-intl").addEventListener("click", () => setMode("international"));
   $("us_source").addEventListener("change", onUsSourceChange);
@@ -730,7 +926,6 @@ async function boot() {
   $("intl_source").addEventListener("change", updateIntlSource);
   $("strategy").addEventListener("change", renderParams);
   $("run").addEventListener("click", runScreen);
-  $("load-rotation").addEventListener("click", loadRotation);
   $("sort-col").addEventListener("change", onSortColChange);
   $("sort-dir").addEventListener("click", toggleSortDir);
   $("prev").addEventListener("click", () => step(-1));
@@ -935,9 +1130,9 @@ function updateIntlSource() {
 function switchTab(which) {
   const screen = which === "screen";
   $("tab-screen").setAttribute("aria-pressed", screen);
-  $("tab-monitor").setAttribute("aria-pressed", !screen);
+  $("tab-rotation").setAttribute("aria-pressed", !screen);
   $("view-screen").classList.toggle("hidden", !screen);
-  $("view-monitor").classList.toggle("hidden", screen);
+  $("view-rotation").classList.toggle("hidden", screen);
 }
 
 // ---------- Screener ----------

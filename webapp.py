@@ -60,7 +60,7 @@ log = logging.getLogger("vektor.web")
 
 CONFIG_PATH = "config/default.yaml"
 OUTPUT_DIR = "results"
-
+INDUSTRY_LEADERS_PROGRESS_PATH = Path(OUTPUT_DIR) / "industry_leaders_progress.json"
 app = Flask(__name__, static_folder="web", static_url_path="")
 
 load_strategies("strategies")
@@ -84,7 +84,6 @@ def _newest_mtime(*modules) -> float:
         except OSError:
             pass
     return newest
-
 
 def _is_stale(png: Path, max_age: float, *renderer_modules) -> bool:
     if not png.exists():
@@ -442,10 +441,166 @@ def stage_chart_png(symbol):
     resp = send_from_directory(str(out_dir), name)
     resp.headers["Cache-Control"] = "no-store"
     return resp
+@app.get("/api/market-state")
+def market_state_endpoint():
+    """
+    Semáforo de estado para los índices americanos principales
+    (src/benchmarks.py::US_MARKET_INDICES), cada uno vía su propio ETF
+    total-return. Backs the four-way traffic light at the top of the
+    Sector Rotation tab.
+    """
+    from src.data_loader import DataLoader
+    from src.benchmarks import us_market_states
 
+    loader = DataLoader()
+    try:
+        states = us_market_states(loader)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Market state failed")
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"markets": states})
+
+@app.get("/api/sector-leaders")
+def sector_leaders_endpoint():
+    """
+    Los 11 sectores SPDR, ordenados por Mansfield RS descendente, cada uno
+    marcado como `is_leader` si cumple el filtro de Weinstein (Etapa 2 y
+    RS > 0). Antes este endpoint devolvía SOLO los líderes; ahora devuelve
+    el ranking completo con el filtro como resaltado, no como recorte --
+    ver los 7 no-líderes es lo que te dice SI el mercado tiene pocos
+    líderes o ninguno, en vez de mostrar una tabla vacía sin contexto.
+    """
+    from src.data_loader import DataLoader
+    from src.rotation import sector_rotation
+
+    loader = DataLoader()
+    try:
+        sectors = sector_rotation(loader)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Sector leaders failed")
+        return jsonify({"error": str(e)}), 500
+
+    for s in sectors:
+        s["is_leader"] = (s["sector_stage"] == "stage2"
+                          and (s["mansfield_rs"] or 0) > 0)
+
+    # Un solo criterio de orden para los 11: RS descendente. is_leader no
+    # entra en la clave de orden -- es un resaltado sobre el ranking, no un
+    # segundo nivel de agrupación que rompería la continuidad del RS.
+    sectors.sort(key=lambda s: s["mansfield_rs"] if s["mansfield_rs"] is not None
+                              else float("-inf"), reverse=True)
+
+    leader_count = sum(1 for s in sectors if s["is_leader"])
+    return jsonify({
+        "sectors": sectors,
+        "leader_count": leader_count,
+        "total_sectors": len(sectors),
+    })
+
+@app.get("/api/sector-leaders-history")
+def sector_leaders_history_endpoint():
+    """
+    El filtro de Weinstein recalculado en cada una de las últimas 6 semanas
+    (src/rotation.py::sector_leaders_history), para ver qué sectores son
+    líderes NUEVOS frente a hace unas semanas. Backs la tabla de cambios
+    bajo el ranking del Paso 2.
+    """
+    from src.data_loader import DataLoader
+    from src.rotation import sector_leaders_history
+
+    loader = DataLoader()
+    try:
+        history = sector_leaders_history(loader, weeks_back=6)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Sector leaders history failed")
+        return jsonify({"error": str(e)}), 500
+    return jsonify(history)
+
+INDUSTRY_LEADERS_CACHE_PATH = Path(OUTPUT_DIR) / "industry_leaders_cache.json"
+INDUSTRY_LEADERS_MAX_AGE = 12 * 3600  # mismo TTL que DataLoader
+_industry_leaders_job = {"running": False}
+
+
+@app.get("/api/industry-leaders")
+def industry_leaders_endpoint():
+    if _industry_leaders_job["running"]:
+        progress = {"done": 0, "total": 0, "current": ""}
+        if INDUSTRY_LEADERS_PROGRESS_PATH.exists():
+            import json
+            try:
+                progress = json.loads(INDUSTRY_LEADERS_PROGRESS_PATH.read_text())
+            except (OSError, json.JSONDecodeError):
+                pass  # progreso es "nice to have"; un fichero a medio escribir no debe romper el polling
+        return jsonify({"status": "calculating", **progress})
+
+    if INDUSTRY_LEADERS_CACHE_PATH.exists():
+        age = time.time() - INDUSTRY_LEADERS_CACHE_PATH.stat().st_mtime
+        if age < INDUSTRY_LEADERS_MAX_AGE:
+            import json
+            data = json.loads(INDUSTRY_LEADERS_CACHE_PATH.read_text())
+            data["status"] = "ready"
+            data["age_seconds"] = int(age)
+            return jsonify(data)
+
+    return jsonify({"status": "not_calculated"})
+
+@app.post("/api/industry-leaders/calculate")
+def industry_leaders_calculate_endpoint():
+    """
+    Dispara el cálculo de forma SÍNCRONA (la petición no responde hasta que
+    termina). Es deliberadamente simple -- sin cola de tareas, sin hilos --
+    a costa de que el navegador debe usar un fetch sin timeout corto. El
+    flag `running` existe solo para que /api/industry-leaders (polling)
+    pueda decir "calculando" mientras tanto, si el usuario recarga la
+    página en otra pestaña.
+    """
+    import json
+    from src.data_loader import DataLoader
+    from src.finviz_engine import FinvizEngine
+    from src.rotation import sector_rotation
+    from src.industry_rotation import industry_leaders
+
+    if _industry_leaders_job["running"]:
+        return jsonify({"error": "Ya hay un cálculo en curso."}), 409
+
+    _industry_leaders_job["running"] = True
+    started = time.time()
+
+    def _write_progress(phase, done, total, current):
+        # best-effort: un fallo de escritura de progreso no debe abortar el
+        # cálculo real -- de ahí el except mudo.
+        try:
+            elapsed = time.time() - started
+            per_item = elapsed / done if done else 0
+            eta_seconds = int(per_item * max(0, total - done))
+            INDUSTRY_LEADERS_PROGRESS_PATH.write_text(json.dumps({
+                "phase": phase, "done": done, "total": total,
+                "current": current, "eta_seconds": eta_seconds,
+            }))
+        except OSError:
+            pass
+
+    try:
+        loader = DataLoader()
+        sectors = sector_rotation(loader)
+        for s in sectors:
+            s["is_leader"] = (s["sector_stage"] == "stage2"
+                              and (s["mansfield_rs"] or 0) > 0)
+        result = industry_leaders(loader, FinvizEngine(), sectors,
+                                  on_progress=_write_progress)
+        result["computed_at"] = time.time()
+        INDUSTRY_LEADERS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        INDUSTRY_LEADERS_CACHE_PATH.write_text(json.dumps(result))
+        return jsonify({**result, "status": "ready", "age_seconds": 0})
+    except Exception as e:  # noqa: BLE001
+        log.exception("Industry leaders calculation failed")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        _industry_leaders_job["running"] = False
+        INDUSTRY_LEADERS_PROGRESS_PATH.unlink(missing_ok=True)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host="127.0.0.1", port=5000, debug=True)

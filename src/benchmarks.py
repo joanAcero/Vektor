@@ -36,21 +36,16 @@ from src.data_loader import DataLoader
 
 log = logging.getLogger(__name__)
 
+US_MARKET_INDICES: dict[str, tuple[str, str]] = {
+    # code -> (display name, ETF symbol)
+    "sp500":    ("S&P 500",     "SPY"),
+    "nasdaq":   ("Nasdaq 100",  "QQQ"),
+    "dowjones": ("Dow Jones",   "DIA"),
+    "russell2000": ("Russell 2000", "IWM"),
+}
 
 BENCHMARKS: dict[str, str] = {
-    # US: SPY (total-return ETF) not ^GSPC (price index), so Mansfield RS
-    # against the SPDR sector ETFs -- which are also total-return -- is
-    # unbiased. See module docstring.
     "US": "SPY",
-    # European markets still use the EURO STOXX 50 price index for now.
-    # Same caveat applies: comparing to iShares MSCI Europe (IEUR, EXW1.DE)
-    # or similar total-return ETFs would be more consistent. Left as-is
-    # because we don't have a strong preferred total-return proxy.
-    "DE": "^STOXX50E",
-    "GB": "^STOXX50E",
-    "FR": "^STOXX50E",
-    "IT": "^STOXX50E",
-    "ES": "^STOXX50E",
 }
 _DEFAULT_BENCHMARK = "SPY"
 
@@ -77,41 +72,87 @@ def get_weekly_close(loader: DataLoader, symbol: str,
     wk = _to_weekly_close(df)
     return wk if not wk.empty else None
 
-
-def detect_regime(loader: DataLoader, market_code: str,
-                  sma_weeks: int = 30, slope_weeks: int = 5) -> dict:
+def market_state_for_symbol(loader: DataLoader, symbol: str) -> dict:
     """
-    Classify the market regime from the benchmark:
-      bull    -- benchmark above its 30W SMA and the SMA rising
-      bear    -- benchmark below its 30W SMA and the SMA falling
-      neutral -- anything else
-
-    A long-only screener can skip scanning in a bear regime.
+    market_state()'s calculation, but on an EXPLICIT symbol instead of one
+    derived from a market_code via benchmark_for(). market_state() below is
+    now a one-line wrapper over this for the single-benchmark callers
+    (detect_regime, run.py's gate) that still only care about one symbol.
     """
-    symbol = benchmark_for(market_code)
+    from src.stages import weekly_ma, ma_slope_pct, TREND_SLOPE_PCT
+
     wk = get_weekly_close(loader, symbol)
-    if wk is None or len(wk) < sma_weeks + slope_weeks:
-        return {"regime": "neutral", "benchmark": symbol,
-                "reason": "insufficient benchmark history"}
+    if wk is None:
+        return {"regime": "unknown", "label": "unknown", "benchmark": symbol,
+                "close": None, "reason": "no benchmark data"}
 
-    sma = wk.rolling(sma_weeks).mean()
-    last_close = float(wk.iloc[-1])
-    last_sma = float(sma.iloc[-1])
-    slope = float(sma.iloc[-1] - sma.iloc[-1 - slope_weeks])
+    ma = weekly_ma(wk)
+    slope = ma_slope_pct(ma)
+    bull = (wk > ma) & (slope > TREND_SLOPE_PCT)
+    bear = (wk < ma) & (slope < -TREND_SLOPE_PCT)
 
-    above = last_close > last_sma
-    rising = slope > 0
-
-    if above and rising:
-        regime, reason = "bull", "benchmark above 30W SMA, SMA rising"
-    elif (not above) and (not rising):
-        regime, reason = "bear", "benchmark below 30W SMA, SMA falling"
+    if bool(bull.iloc[-1]):
+        regime, label = "bull", "alcista"
+    elif bool(bear.iloc[-1]):
+        regime, label = "bear", "bajista"
     else:
-        regime, reason = "neutral", "benchmark and SMA disagree"
+        side = pd.Series(np.where(bull, "bull", np.where(bear, "bear", np.nan)),
+                         index=wk.index).ffill()
+        last_side = side.iloc[-1] if not side.empty else None
+        if last_side == "bull":
+            regime, label = "amber_from_bull", "correccion"
+        elif last_side == "bear":
+            regime, label = "amber_from_bear", "base"
+        else:
+            regime, label = "unknown", "unknown"
 
-    return {"regime": regime, "benchmark": symbol, "reason": reason,
-            "close": last_close, "sma": last_sma, "slope": slope}
+    reason = None if regime != "unknown" else "insufficient weekly history"
+    return {"regime": regime, "label": label, "benchmark": symbol,
+            "close": float(wk.iloc[-1]), "reason": reason}
 
+
+def market_state(loader: DataLoader, market_code: str = "US") -> dict:
+    """Thin wrapper over market_state_for_symbol() for single-benchmark
+    callers (detect_regime, run.py) that still think in market_code terms."""
+    return market_state_for_symbol(loader, benchmark_for(market_code))
+
+
+def us_market_states(loader: DataLoader) -> list[dict]:
+    """market_state_for_symbol() for every index in US_MARKET_INDICES, in
+    that dict's declared order. Backs the four-way semaphore on the Sector
+    Rotation tab."""
+    out = []
+    for code, (name, symbol) in US_MARKET_INDICES.items():
+        state = market_state_for_symbol(loader, symbol)
+        out.append({"code": code, "name": name, **state})
+    return out
+
+
+def detect_regime(loader: DataLoader, market_code: str) -> dict:
+    """
+    Coarse bull/bear/neutral gate for run.py's long-only scanners.
+
+    Thin wrapper over market_state(): "bull"/"bear" pass straight through,
+    both amber flavors and "unknown" collapse to "neutral" -- this gate only
+    needs to know whether to skip scanning, not which kind of pause the
+    market is in. Shares the MA30/slope primitives with market_state()
+    (and therefore with src/stages.py) rather than defining its own
+    threshold, which is the one thing worth keeping from my earlier attempt
+    at consolidating this with classify_last() -- that attempt was wrong
+    for the reason explained in market_state()'s docstring, but sharing a
+    threshold instead of a state machine is still a correct simplification.
+    """
+    state = market_state(loader, market_code)
+    if state["regime"] in ("bull", "bear"):
+        regime = state["regime"]
+    else:
+        regime = "neutral"
+    reason = {
+        "bull": "benchmark above a rising 30W MA",
+        "bear": "benchmark below a falling 30W MA",
+    }.get(state["regime"], state.get("reason") or f"benchmark reading: {state['label']}")
+
+    return {"regime": regime, "benchmark": state["benchmark"], "reason": reason}
 
 def mansfield_rs(stock_weekly_close: pd.Series, index_weekly_close: pd.Series,
                  n: int = 52) -> pd.Series:

@@ -50,9 +50,11 @@ class DataLoader:
         if self._fresh(path):
             try:
                 df = pd.read_csv(path, index_col=0, parse_dates=True)
-                if not df.empty:
+                if not df.empty and set(df.columns) == set(_OHLCV):
                     log.debug("Cache hit: %s", ticker)
                     return df
+                log.warning("Cached %s has unexpected columns %s; re-downloading.",
+                            ticker, list(df.columns))
             except Exception:  # noqa: BLE001 — corrupt cache, fall through to download
                 log.warning("Corrupt cache for %s; re-downloading.", ticker)
 

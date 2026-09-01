@@ -28,11 +28,6 @@ from finvizfinance.screener.overview import Overview as ScreenerOverview
 
 log = logging.getLogger(__name__)
 
-_LIQUIDITY_FILTERS = {
-    "Market Cap.": "+Small (over $300mln)",
-    "Average Volume": "Over 300K",
-}
-
 # The metadata contract for every ticker-detail frame this module returns.
 # src/market_us.py imports this so the shape is declared in exactly one place.
 DETAIL_COLS = ("Ticker", "Name", "Sector", "Industry")
@@ -147,33 +142,40 @@ class FinvizEngine:
         return self._get_group_top("Sector", top_n, col_target, "Sectors")
 
     def get_ticker_details_in_sector(self, sector_name: str) -> pd.DataFrame:
-        """Return DETAIL_COLS for liquid stocks in a sector."""
+        """Return DETAIL_COLS for stocks in a sector.
+
+        No liquidity filter: every stock Finviz lists under this sector,
+        including penny stocks and near-zero-volume names. Removed deliberately
+        -- VEKTOR no longer decides for the caller what counts as "tradeable".
+        """
         log.info("Fetching ticker details for sector: %s", sector_name)
-        df = self._screener_filter({"Sector": sector_name, **_LIQUIDITY_FILTERS})
+        df = self._screener_filter({"Sector": sector_name})
         result = self._normalise_details(df)
         if result.empty:
             return result
-        result["Sector"] = sector_name  # normalise
+        result["Sector"] = sector_name
         return result
 
     def get_ticker_details_in_industry(self, industry_name: str) -> pd.DataFrame:
-        """Return DETAIL_COLS for liquid stocks in an industry."""
+        """Return DETAIL_COLS for stocks in an industry. No liquidity filter --
+        see get_ticker_details_in_sector()."""
         log.info("Fetching ticker details for industry: %s", industry_name)
-        df = self._screener_filter({"Industry": industry_name, **_LIQUIDITY_FILTERS})
+        df = self._screener_filter({"Industry": industry_name})
         result = self._normalise_details(df)
         if result.empty:
             return result
-        result["Industry"] = industry_name  # normalise
+        result["Industry"] = industry_name
         return result
 
     def get_all_market_details(self) -> pd.DataFrame:
         """
-        Return DETAIL_COLS for ALL liquid stocks in the market, without any
-        industry pre-filter. This is the universe for a full-market scan. Note:
-        this can be thousands of names; finvizfinance paginates, so it may take
-        a while and issue many requests.
+        Return DETAIL_COLS for ALL stocks in the market, no liquidity filter.
+        This can be several times the ~thousands of names the old filtered
+        version returned -- every penny stock and micro-cap Finviz lists, in
+        addition to everything already covered. finvizfinance paginates, so
+        expect a long-running call and a proportionally longer scan afterward.
         """
-        log.info("Fetching FULL market universe from Finviz (liquidity filters only)...")
-        result = self._normalise_details(self._screener_filter(dict(_LIQUIDITY_FILTERS)))
+        log.info("Fetching FULL market universe from Finviz (no filters)...")
+        result = self._normalise_details(self._screener_filter({}))
         log.info("Full market universe: %d tickers.", len(result))
         return result

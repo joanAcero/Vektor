@@ -10,8 +10,31 @@ Fixes over the original:
   * ``auto_adjust`` is set explicitly (its yfinance default flipped to True in
     0.2.28+, silently changing prices for anyone relying on the old default).
     We use adjusted prices because Weinstein-style trend analysis must be
-    split/dividend-consistent — but because adjusted history is rewritten on
+    split/dividend-consistent -- but because adjusted history is rewritten on
     every corporate action, the cache is time-boxed rather than permanent.
+  * The download path used to accept any frame containing the five OHLCV
+    names, even with EXTRA columns (e.g. 'Close'/'Close.1' from a MultiIndex
+    flattened without checking which ticker it belonged to). That let a
+    malformed or mis-attributed download get written straight to the cache,
+    where nothing downstream could tell a Series-shaped column from a
+    corrupted 2-column frame until pandas raised deep inside stages.py or
+    rotation.py (align()/classify() crashes several calls removed from the
+    real cause). The download path's validation now mirrors the cache-read
+    validation exactly -- same _OHLCV set, no extras allowed -- and a
+    MultiIndex is checked against the REQUESTED ticker before being
+    flattened, not after. A response labelled with the wrong ticker is now
+    discarded instead of being cached under the wrong symbol with no error
+    raised anywhere.
+  * ``threads=False`` on yf.download(). yfinance's default (threads=True)
+    stores each ticker's result in an internal global dict (shared._DFS)
+    that is not thread-safe -- see ranaroussi/yfinance#2557. Calling
+    get_data() in a tight loop for many tickers (exactly what sector_rotation
+    and us_market_states do) triggered this: XLE's request coming back
+    labelled QQQ, DIA's coming back labelled XLE, etc., every single ticker,
+    every run. threads=False is the documented workaround and is the actual
+    fix for the mislabelling; the ticker-label check above is what makes
+    that failure mode visible in the first place and stays on as a permanent
+    safety net, not a workaround to be removed once this is confirmed fixed.
 """
 
 from __future__ import annotations
@@ -55,13 +78,14 @@ class DataLoader:
                     return df
                 log.warning("Cached %s has unexpected columns %s; re-downloading.",
                             ticker, list(df.columns))
-            except Exception:  # noqa: BLE001 — corrupt cache, fall through to download
+            except Exception:  # noqa: BLE001 -- corrupt cache, fall through to download
                 log.warning("Corrupt cache for %s; re-downloading.", ticker)
 
         try:
             df = yf.download(
                 ticker, start=start_date, end=end_date,
                 progress=False, auto_adjust=self.auto_adjust,
+                threads=False,
             )
         except Exception as e:  # noqa: BLE001
             log.error("Download failed for %s: %s", ticker, e)
@@ -72,11 +96,23 @@ class DataLoader:
             return None
 
         if isinstance(df.columns, pd.MultiIndex):
+            # yfinance labels a single-ticker download (Field, Ticker). Under
+            # rate-limiting we've observed it return a frame carrying a
+            # DIFFERENT ticker's data. Check the label BEFORE collapsing the
+            # MultiIndex -- collapsing first and validating names only would
+            # still pass, since the field names match regardless of whose
+            # data they hold.
+            labels = df.columns.get_level_values(1).unique().tolist()
+            if labels != [ticker]:
+                log.error("%s: download returned data labelled %s, not %s; "
+                          "discarding rather than caching under the wrong "
+                          "symbol.", ticker, labels, ticker)
+                return None
             df.columns = df.columns.get_level_values(0)
 
-        missing = [c for c in _OHLCV if c not in df.columns]
-        if missing:
-            log.error("%s missing expected columns %s; skipping.", ticker, missing)
+        if set(df.columns) != set(_OHLCV):
+            log.error("%s: downloaded columns %s don't match expected %s; "
+                      "discarding.", ticker, list(df.columns), _OHLCV)
             return None
 
         try:

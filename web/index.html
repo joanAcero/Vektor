@@ -112,6 +112,9 @@
 
     /* StockCharts quadrant palette. Mirrors QUADRANT_COLOR in src/rotation.py. */
     --q-leading:   #2f9e44;
+    --q-leading-dim: #4f7a55;  /* Alcista 2: same hue, desaturated -- still
+                                  reads as "bullish" at a glance, clearly
+                                  less green than Alcista 1 next to it */
     --q-improving: #1c7ed6;
     --q-weakening: #f1c40f;
     --q-lagging:   #e03131;
@@ -275,6 +278,29 @@
   .desc p:last-child { margin-bottom: 0; }
   .desc b { color: var(--ink); }
 
+  /* Market-context intro: the funnel statement framing the three panels
+     below (market health -> sector rotation -> industry leadership).
+     Deliberately NOT styled like .desc -- .desc is a small reference note
+     pinned to a data table; this is the lede for the whole tab and has to
+     read at a glance on entry, not be scanned like a caveat. */
+  .intro-panel .legend { color: var(--accent); margin-bottom: 12px; }
+  .intro-lede {
+    font-size: 18px; line-height: 1.55; font-weight: 500;
+    color: var(--ink); margin: 0 0 18px;
+  }
+  .intro-lede b { color: var(--accent); font-weight: 600; }
+  .intro-flow {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 10px; font-size: 13.5px; color: var(--muted);
+  }
+  .intro-flow .step { flex: 1 1 0; min-width: 180px; }
+  .intro-flow .step b { color: var(--ink); }
+  .intro-flow .arrow { color: var(--line); font-size: 16px; }
+  @media (max-width: 640px) {
+    .intro-flow { flex-direction: column; align-items: flex-start; }
+    .intro-flow .arrow { display: none; }
+  }
+
   /* Collapsible explainers: available on demand, not shouting on every load. */
   details.doc {
     background: var(--field); border: 1px solid var(--line);
@@ -368,11 +394,13 @@
   a { color: var(--accent); }
 
   /* Sector-rotation market-state semaphore, one card per US index. Its own
-     3-colour palette (reusing --q-leading/--q-weakening/--q-lagging, already
-     defined for the RRG quadrants) rather than the 4-colour --s1..--s4 stage
-     palette: this widget answers "¿es seguro cazar?" (3 states) for each
-     index separately, not "which of the four stages is this" — the amber
-     sub-label (correction vs. base), not the colour, carries that distinction. */
+     palette (reusing --q-leading/--q-weakening/--q-lagging, already defined
+     for the RRG quadrants) rather than the 4-colour --s1..--s4 stage
+     palette: this widget answers "¿es seguro cazar?" for each index
+     separately, not "which of the four stages is this". Alcista now has two
+     shades (state-bull / state-bull-warn) so a 30W-intact-but-below-MA10
+     pullback is visible without leaving the bull palette or turning amber —
+     amber is reserved for the MA30 trend itself breaking down. */
   .market-state-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 10px; margin-top: 12px;
@@ -390,10 +418,11 @@
     font-size: 15px; font-weight: 700; letter-spacing: .02em;
     padding: 4px 12px; border-radius: 20px; color: #fff;
   }
-  .market-state.state-bull    .ms-badge { background: var(--q-leading); }
-  .market-state.state-bear    .ms-badge { background: var(--q-lagging); }
-  .market-state.state-amber   .ms-badge { background: var(--q-weakening); color: #1a1400; }
-  .market-state.state-unknown .ms-badge { background: var(--muted); }
+  .market-state.state-bull      .ms-badge { background: var(--q-leading); }
+  .market-state.state-bull-warn .ms-badge { background: var(--q-leading-dim); }
+  .market-state.state-bear      .ms-badge { background: var(--q-lagging); }
+  .market-state.state-amber     .ms-badge { background: var(--q-weakening); color: #1a1400; }
+  .market-state.state-unknown   .ms-badge { background: var(--muted); }
   .market-state .ms-bench {
     font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
   }
@@ -409,20 +438,28 @@
 
   <div class="tabs">
     <button type="button" class="tab" id="tab-screen" aria-pressed="true">Screener</button>
-    <button type="button" class="tab" id="tab-rotation" aria-pressed="false">Rotación sectorial</button>
+    <button type="button" class="tab" id="tab-rotation" aria-pressed="false">Contexto de mercado</button>
   </div>
 
-  <!-- ================= SECTOR ROTATION ================= -->
+  <!-- ================= MARKET CONTEXT =================
+       ids kept as -rotation on purpose: renaming them means touching every
+       JS handler that toggles this view or loads its data, which is a
+       separate change from the label/copy update requested here. -->
   <div id="view-rotation" class="hidden">
 
-    <div class="panel">
-      <div class="legend">Rotación sectorial</div>
-      <div class="desc">
-        <p>
-          <b>Aproximadamente la mitad del movimiento de una acción viene del
-          movimiento de su sector. Por eso, al buscar la próxima compra, es
-          clave limitar la búsqueda a los sectores líderes del momento.</b>
-        </p>
+    <div class="panel intro-panel">
+      <div class="legend">Contexto de mercado</div>
+      <p class="intro-lede">
+        Antes de buscar una acción concreta, el contexto tiene que acompañar:
+        <b>el mercado, el sector y la industria</b> explican gran parte de su
+        movimiento antes de que el gráfico individual entre en juego.
+      </p>
+      <div class="intro-flow">
+        <span class="step"><b>1. Mercado</b> — ¿el conjunto acompaña?</span>
+        <span class="arrow">→</span>
+        <span class="step"><b>2. Sectores</b> — ¿dónde está entrando el dinero?</span>
+        <span class="arrow">→</span>
+        <span class="step"><b>3. Industrias</b> — ¿qué grupo lidera dentro del sector?</span>
       </div>
     </div>
 
@@ -435,7 +472,8 @@
           el S&amp;P 500, el Nasdaq 100, el Dow Jones y el Russell 2000, cada
           uno contra su propia MA30 semanal. Lo calculamos de la siguiente forma (simple pero efectiva):
           <ul>
-            <li><b>Alcista</b> — cierre por encima de la MA30 semanal, con la MA30 ascendente.</li>
+            <li><b>Alcista 1</b> — cierre por encima de la MA30 semanal, con la MA30 ascendente, y cierre igual o por encima de la MA10 semanal.</li>
+            <li><b>Alcista 2</b> — igual que Alcista 1, pero con el cierre por debajo de la MA10 semanal (la línea de aviso de Weinstein). El semáforo sigue en verde, pero más apagado: la tendencia de fondo aguanta, aunque ya hay una grieta que vigilar.</li>
             <li><b>Bajista</b> — cierre por debajo de la MA30 semanal, con la MA30 descendente.</li>
             <li><b>Corrección</b> — ni lo uno ni lo otro ahora mismo, y la última lectura clara fue alcista.</li>
             <li><b>Formando base</b> — ni lo uno ni lo otro ahora mismo, y la última lectura clara fue bajista.</li>
@@ -685,7 +723,8 @@ function sortForHunting(sectors) {
 // Mirrors the regime values src/benchmarks.py::market_state_for_symbol() can
 // return. Change both together.
 const MARKET_STATE_META = {
-  bull:            { emoji: "🟢", label: "ALCISTA",       cls: "state-bull" },
+  bull:            { emoji: "🟢", label: "ALCISTA 1",     cls: "state-bull" },
+  bull_below_ma10: { emoji: "🟢", label: "ALCISTA 2",     cls: "state-bull-warn" },
   bear:            { emoji: "🔴", label: "BAJISTA",       cls: "state-bear"},
   amber_from_bull: { emoji: "🟡", label: "CORRECCIÓN",    cls: "state-amber"},
   amber_from_bear: { emoji: "🟡", label: "FORMANDO BASE", cls: "state-amber"},

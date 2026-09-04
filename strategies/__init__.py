@@ -1,14 +1,3 @@
-"""
-strategies package
-------------------
-EXPLICIT strategy manifest. Each active strategy is imported here exactly once;
-the import triggers its @register decorator. This is the single place that
-controls which strategies the application exposes.
-
-To add a strategy:   write strategies/my_strategy.py, then add one line below.
-To disable one:      comment out or remove its import line.
-"""
-
 from . import browse_all       # noqa: F401
 from . import three_month_high  # noqa: F401
 from . import weinstein_setup  # noqa: F401

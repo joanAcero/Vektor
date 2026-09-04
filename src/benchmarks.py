@@ -1,30 +1,3 @@
-"""
-benchmarks.py
--------------
-Market benchmarks, regime detection and Mansfield relative strength.
-
-Mansfield RS is the Weinstein-school measure of whether a stock (or sector
-ETF) is outperforming its market index:
-
-    RP  = (stock / index) * 100
-    MRS = ((RP / SMA(RP, n)) - 1) * 100
-
-MRS > 0 means the stock is stronger than the index relative to its own
-recent norm; MRS < 0 means it is lagging.
-
-Benchmark choice matters for correctness. yfinance with `auto_adjust=True`
-returns TOTAL-RETURN prices (dividends reinvested) for ETFs like SPY and
-the SPDR sector ETFs (XL*), but ^GSPC is a PRICE INDEX -- dividends are
-excluded from its history no matter how it's fetched. Comparing a total-
-return numerator to a price-index denominator introduces a systematic bias
-of roughly the S&P 500's dividend yield (~1.5-2%/yr) into every Mansfield
-RS reading, favoring high-yield sectors (XLU, XLP, XLRE, XLE) and
-penalising low-yield ones (XLK, XLY).
-
-Fix: benchmark to SPY, which under auto_adjust is total-return like the
-sectors. All Mansfield RS calculations become apples-to-apples.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -78,8 +51,21 @@ def market_state_for_symbol(loader: DataLoader, symbol: str) -> dict:
     derived from a market_code via benchmark_for(). market_state() below is
     now a one-line wrapper over this for the single-benchmark callers
     (detect_regime, run.py's gate) that still only care about one symbol.
+
+    "bull" (Alcista) splits into two shades once the base MA30 condition is
+    met, reusing weekly_ma_fast()/MA_FAST_WEEKS from src/stages.py -- the
+    SAME 10-week "warning line" Weinstein's own stage rules use, not a
+    second definition of it:
+      - "bull"            Alcista 1 -- close still at/above the 10-week MA.
+      - "bull_below_ma10" Alcista 2 -- close has slipped below the 10-week
+                           MA while the 30-week trend is still intact.
+    This is a SUB-classification of "bull" only. It does not touch the
+    bull/bear `side` history below, so Corrección/Formando base are decided
+    exactly as before, from the base MA30+slope regime alone -- a pullback
+    below MA10 during an uptrend must not be read as "last clear reading
+    was bearish".
     """
-    from src.stages import weekly_ma, ma_slope_pct, TREND_SLOPE_PCT
+    from src.stages import weekly_ma, weekly_ma_fast, ma_slope_pct, TREND_SLOPE_PCT
 
     wk = get_weekly_close(loader, symbol)
     if wk is None:
@@ -87,12 +73,20 @@ def market_state_for_symbol(loader: DataLoader, symbol: str) -> dict:
                 "close": None, "reason": "no benchmark data"}
 
     ma = weekly_ma(wk)
+    ma10 = weekly_ma_fast(wk)
     slope = ma_slope_pct(ma)
     bull = (wk > ma) & (slope > TREND_SLOPE_PCT)
     bear = (wk < ma) & (slope < -TREND_SLOPE_PCT)
 
     if bool(bull.iloc[-1]):
-        regime, label = "bull", "alcista"
+        # NaN MA10 (insufficient history) compares False in both directions,
+        # so this quietly falls back to Alcista 1 rather than raising --
+        # consistent with "unknown stays unknown" for a missing benchmark
+        # above, rather than inventing a warning state from no data.
+        if bool(wk.iloc[-1] < ma10.iloc[-1]):
+            regime, label = "bull_below_ma10", "alcista_2"
+        else:
+            regime, label = "bull", "alcista"
     elif bool(bear.iloc[-1]):
         regime, label = "bear", "bajista"
     else:
@@ -141,14 +135,22 @@ def detect_regime(loader: DataLoader, market_code: str) -> dict:
     at consolidating this with classify_last() -- that attempt was wrong
     for the reason explained in market_state()'s docstring, but sharing a
     threshold instead of a state machine is still a correct simplification.
+
+    "bull_below_ma10" (Alcista 2) is a shade of "bull", not a fourth coarse
+    state: the 30-week trend that this gate actually cares about is still
+    intact, so it collapses to "bull" here too. The reason string still
+    says which shade it was, for anyone reading scan logs.
     """
     state = market_state(loader, market_code)
-    if state["regime"] in ("bull", "bear"):
-        regime = state["regime"]
+    if state["regime"] in ("bull", "bull_below_ma10"):
+        regime = "bull"
+    elif state["regime"] == "bear":
+        regime = "bear"
     else:
         regime = "neutral"
     reason = {
         "bull": "benchmark above a rising 30W MA",
+        "bull_below_ma10": "benchmark above a rising 30W MA, but below the 10W MA",
         "bear": "benchmark below a falling 30W MA",
     }.get(state["regime"], state.get("reason") or f"benchmark reading: {state['label']}")
 

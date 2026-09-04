@@ -280,7 +280,8 @@ def _weeks_in_quadrant(quadrants: list[str]) -> int | None:
 # ------------------------------------------------------------------
 def sector_rotation(loader, *,
                     tail_weeks: int = DEFAULT_TAIL_WEEKS,
-                    start_date: str = DEFAULT_START_DATE) -> list[dict]:
+                    start_date: str = DEFAULT_START_DATE,
+                    rs_weeks: int = 52) -> list[dict]:
     """
     RRG snapshot of the 11 SPDR sector ETFs against the US benchmark.
 
@@ -354,7 +355,7 @@ def sector_rotation(loader, *,
         tail_pct = ((float(last["rs"]) / tail_start_rs - 1.0) * 100.0
                     if tail_start_rs else 0.0)
         stage = classify_last(etf_wk)
-        mrs_series = mansfield_rs(etf_wk, index_wk)
+        mrs_series = mansfield_rs(etf_wk, index_wk, n=rs_weeks)
         mansfield = (float(mrs_series.iloc[-1])
                      if not mrs_series.empty and pd.notna(mrs_series.iloc[-1])
                      else None)
@@ -388,8 +389,10 @@ def sector_rotation(loader, *,
                              -r["distance"]))
     return rows
 
+
 def sector_leaders_history(loader, *, weeks_back: int = 6,
-                           start_date: str = DEFAULT_START_DATE) -> dict:
+                           start_date: str = DEFAULT_START_DATE,
+                           rs_weeks: int = 52) -> dict:
     """
     El filtro de Weinstein (Etapa 2 y Mansfield RS > 0) RECALCULADO en cada
     uno de los últimos `weeks_back` cortes semanales, con el RANGO por RS
@@ -446,7 +449,7 @@ def sector_leaders_history(loader, *, weeks_back: int = 6,
             index_wk = index_wk_full.reindex(etf_wk.index).dropna()
 
             stage = classify_last(etf_wk)
-            mrs_series = mansfield_rs(etf_wk, index_wk)
+            mrs_series = mansfield_rs(etf_wk, index_wk, n=rs_weeks)
             mrs = (float(mrs_series.iloc[-1])
                    if not mrs_series.empty and pd.notna(mrs_series.iloc[-1])
                    else None)

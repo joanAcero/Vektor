@@ -441,41 +441,252 @@ def stage_chart_png(symbol):
     resp = send_from_directory(str(out_dir), name)
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+def render_market_chart(symbol: str, out_path: str, title: str = "") -> bool:
+    """
+    Renders weekly market index chart with:
+      - Weekly candles
+      - MA(10) dashed and MA(30) solid
+      - Weekly volume with Vol MA(10)
+      - MACD(12, 26, 9) histogram and lines
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from src.data_loader import DataLoader
+    from src.indicators import macd
+
+    loader = DataLoader()
+    df = loader.get_data(symbol.upper(), start_date="2018-01-01")
+    if df is None or df.empty or len(df) < 50:
+        return False
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+
+    wk = df.resample("W-FRI").agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }).dropna()
+
+    if len(wk) < 35:
+        return False
+
+    wk["MA10"] = wk["Close"].rolling(10).mean()
+    wk["MA30"] = wk["Close"].rolling(30).mean()
+    macd_df = macd(wk["Close"])
+    for col in macd_df.columns:
+        wk[col] = macd_df[col]
+    wk["Vol_MA10"] = wk["Volume"].rolling(10).mean()
+
+    # Last 3 years of weekly bars
+    cutoff = wk.index.max() - pd.Timedelta(weeks=156)
+    view = wk.loc[wk.index >= cutoff].copy()
+    if len(view) < 10:
+        view = wk.copy()
+
+    fig, (ax_price, ax_vol, ax_macd) = plt.subplots(
+        3, 1, figsize=(13, 8.5), sharex=True,
+        gridspec_kw={"height_ratios": [3, 1, 1]},
+    )
+    fig.patch.set_facecolor("#ffffff")
+
+    # 1. Price candles
+    o, h, l, c = view["Open"].values, view["High"].values, view["Low"].values, view["Close"].values
+    x = mdates.date2num(view.index.to_pydatetime())
+    for i in range(len(view)):
+        col = "#26a641" if c[i] >= o[i] else "#e03131"
+        ax_price.plot([x[i], x[i]], [l[i], h[i]], color=col, linewidth=0.9, zorder=3)
+        ax_price.add_patch(mpatches.Rectangle(
+            (x[i] - 2.5, min(o[i], c[i])), 5, abs(c[i] - o[i]) or 1e-9,
+            facecolor=col, edgecolor=col, linewidth=0.4, zorder=4,
+        ))
+
+    ax_price.plot(view.index, view["MA30"], color="#e07b00", linewidth=1.8,
+                  label="MA30 semanal", zorder=5)
+    ax_price.plot(view.index, view["MA10"], color="#2563eb", linewidth=1.4,
+                  linestyle="--", label="MA10 semanal", zorder=5)
+    ax_price.set_ylabel("Precio", fontsize=10, fontweight="bold")
+    ax_price.grid(True, linestyle=":", alpha=0.6)
+    ax_price.legend(loc="lower left", fontsize=9, framealpha=0.9)
+
+    # 2. Volume
+    vols = view["Volume"].values
+    vcol = np.where(c >= o, "#86efac", "#fca5a5")
+    ax_vol.bar(view.index, vols, color=vcol, width=5, zorder=2)
+    ax_vol.plot(view.index, view["Vol_MA10"], color="#334155", linewidth=1.2,
+                label="Vol MA(10)", zorder=3)
+    ax_vol.set_ylabel("Volumen", fontsize=10, fontweight="bold")
+    ax_vol.grid(True, linestyle=":", alpha=0.6)
+    ax_vol.legend(loc="upper left", fontsize=8, framealpha=0.85)
+
+    # 3. MACD
+    hist = view["MACD_Hist"]
+    hcol = np.where(hist.fillna(0) >= 0, "#93c5fd", "#fecaca")
+    ax_macd.bar(view.index, hist, color=hcol, width=5, zorder=2)
+    ax_macd.plot(view.index, view["MACD"], color="#1d4ed8", linewidth=1.3,
+                 label="MACD(12,26)", zorder=4)
+    ax_macd.plot(view.index, view["MACD_Signal"], color="#b91c1c", linewidth=1.1,
+                 label="Signal(9)", zorder=4)
+    ax_macd.axhline(0, color="#94a3b8", linewidth=0.9, zorder=1)
+    ax_macd.set_ylabel("MACD", fontsize=10, fontweight="bold")
+    ax_macd.grid(True, linestyle=":", alpha=0.6)
+    ax_macd.legend(loc="upper left", fontsize=8, framealpha=0.85, ncol=2)
+
+    ax_macd.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    ax_macd.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    plt.setp(ax_macd.get_xticklabels(), rotation=45, ha="right")
+
+    full_title = title or f"{symbol} — Gráfico semanal"
+    fig.suptitle(full_title, fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+@app.get("/api/market-chart/<symbol>.png")
+def market_chart_png(symbol):
+    """
+    Weekly chart for market benchmarks (RSP, SPY, QQQ, DIA, IWM) with:
+    MA(10), MA(30), Volume, and MACD.
+    """
+    from src.benchmarks import US_MARKET_INDICES
+
+    if not re.fullmatch(r"[A-Za-z0-9._^-]{1,15}", symbol):
+        return jsonify({"error": "bad symbol"}), 400
+
+    sym_upper = symbol.upper()
+    title_match = ""
+    for _code, (name, s) in US_MARKET_INDICES.items():
+        if s.upper() == sym_upper:
+            title_match = f"{name} ({sym_upper}) — Gráfico semanal"
+            break
+
+    out_dir = Path(OUTPUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = f"market_{sym_upper}.png"
+    png = out_dir / name
+
+    if request.args.get("force") == "1" or not png.exists() or (time.time() - png.stat().st_mtime > 3600 * 6):
+        try:
+            ok = render_market_chart(sym_upper, str(png), title=title_match)
+            if not ok:
+                return jsonify({"error": "chart generation failed"}), 500
+        except Exception:  # noqa: BLE001
+            log.exception("Market chart render failed for %s", sym_upper)
+
+    if not png.exists():
+        return jsonify({"error": "chart unavailable"}), 503
+    resp = send_from_directory(str(out_dir), name)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/market-chart/<symbol>")
+def market_chart_page(symbol):
+    """HTML wrapper page displaying the market weekly chart in a clean viewer tab."""
+    from src.benchmarks import US_MARKET_INDICES
+
+    sym_upper = symbol.upper()
+    title_text = f"{sym_upper} — Gráfico semanal"
+    for _code, (name, s) in US_MARKET_INDICES.items():
+        if s.upper() == sym_upper:
+            title_text = f"{name} ({sym_upper}) — Gráfico semanal"
+            break
+
+    html = f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>{title_text} | VEKTOR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/png" href="/config/icon.png">
+  <style>
+    body {{
+      margin: 0; padding: 24px; background: #0f172a; color: #f8fafc;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 100vh; box-sizing: border-box;
+    }}
+    .header {{
+      width: 100%; max-width: 1300px; display: flex; justify-content: space-between;
+      align-items: center; margin-bottom: 16px;
+    }}
+    h1 {{ font-size: 18px; margin: 0; font-weight: 600; }}
+    .badge {{
+      background: #1e293b; color: #94a3b8; padding: 4px 10px; border-radius: 6px;
+      font-size: 13px; font-family: ui-monospace, Menlo, monospace;
+    }}
+    .img-wrap {{
+      background: #ffffff; padding: 12px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      max-width: 100%; overflow: auto;
+    }}
+    img {{ display: block; max-width: 100%; height: auto; border-radius: 4px; }}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>{title_text}</h1>
+    <span class="badge">MA10 · MA30 · Volumen · MACD</span>
+  </div>
+  <div class="img-wrap">
+    <img src="/api/market-chart/{sym_upper}.png" alt="{title_text}">
+  </div>
+</body>
+</html>"""
+    return html
 @app.get("/api/market-state")
 def market_state_endpoint():
     """
     Semáforo de estado para los índices americanos principales
-    (src/benchmarks.py::US_MARKET_INDICES), cada uno vía su propio ETF
-    total-return. Backs the four-way traffic light at the top of the
-    Sector Rotation tab.
+    (src/benchmarks.py::US_MARKET_INDICES), calculados en dos horizontes:
+    largo plazo (MA30) y medio plazo (MA10).
     """
     from src.data_loader import DataLoader
     from src.benchmarks import us_market_states
 
     loader = DataLoader()
     try:
-        states = us_market_states(loader)
+        long_term = us_market_states(loader, timeframe="long")
+        medium_term = us_market_states(loader, timeframe="medium")
     except Exception as e:  # noqa: BLE001
         log.exception("Market state failed")
         return jsonify({"error": str(e)}), 500
-    return jsonify({"markets": states})
+    return jsonify({
+        "long_term": long_term,
+        "medium_term": medium_term,
+        "markets": long_term,
+    })
 
 @app.get("/api/sector-leaders")
 def sector_leaders_endpoint():
     """
     Los 11 sectores SPDR, ordenados por Mansfield RS descendente, cada uno
     marcado como `is_leader` si cumple el filtro de Weinstein (Etapa 2 y
-    RS > 0). Antes este endpoint devolvía SOLO los líderes; ahora devuelve
-    el ranking completo con el filtro como resaltado, no como recorte --
-    ver los 7 no-líderes es lo que te dice SI el mercado tiene pocos
-    líderes o ninguno, en vez de mostrar una tabla vacía sin contexto.
+    RS > 0). Permite seleccionar el horizonte de cálculo de Mansfield RS
+    vía query param `rs_weeks` (52 por defecto, 26 semestral, 13 trimestral).
     """
+    from flask import request
     from src.data_loader import DataLoader
     from src.rotation import sector_rotation
 
+    rs_weeks = request.args.get("rs_weeks", 52, type=int)
+    if rs_weeks not in (13, 26, 52):
+        rs_weeks = 52
+
     loader = DataLoader()
     try:
-        sectors = sector_rotation(loader)
+        sectors = sector_rotation(loader, rs_weeks=rs_weeks)
     except Exception as e:  # noqa: BLE001
         log.exception("Sector leaders failed")
         return jsonify({"error": str(e)}), 500
@@ -495,6 +706,7 @@ def sector_leaders_endpoint():
         "sectors": sectors,
         "leader_count": leader_count,
         "total_sectors": len(sectors),
+        "rs_weeks": rs_weeks,
     })
 
 @app.get("/api/sector-leaders-history")
@@ -502,15 +714,22 @@ def sector_leaders_history_endpoint():
     """
     El filtro de Weinstein recalculado en cada una de las últimas 6 semanas
     (src/rotation.py::sector_leaders_history), para ver qué sectores son
-    líderes NUEVOS frente a hace unas semanas. Backs la tabla de cambios
-    bajo el ranking del Paso 2.
+    líderes NUEVOS frente a hace unas semanas. Permite seleccionar el
+    horizonte de cálculo de Mansfield RS vía query param `rs_weeks`
+    (52 por defecto, 26 semestral, 13 trimestral).
     """
+    from flask import request
     from src.data_loader import DataLoader
     from src.rotation import sector_leaders_history
 
+    rs_weeks = request.args.get("rs_weeks", 52, type=int)
+    if rs_weeks not in (13, 26, 52):
+        rs_weeks = 52
+
     loader = DataLoader()
     try:
-        history = sector_leaders_history(loader, weeks_back=6)
+        history = sector_leaders_history(loader, weeks_back=6, rs_weeks=rs_weeks)
+        history["rs_weeks"] = rs_weeks
     except Exception as e:  # noqa: BLE001
         log.exception("Sector leaders history failed")
         return jsonify({"error": str(e)}), 500

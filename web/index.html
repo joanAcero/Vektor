@@ -190,9 +190,16 @@
     flex: 1; padding: 8px 12px; font: inherit; cursor: pointer;
     background: var(--field); color: var(--muted); border: 1px solid var(--line);
   }
+  .seg button + button { border-left: none; }
   .seg button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
-  .seg button:last-child  { border-radius: 0 var(--radius) var(--radius) 0; border-left: none; }
+  .seg button:last-child  { border-radius: 0 var(--radius) var(--radius) 0; }
   .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .btn-retry {
+    background: transparent; border: 1px solid var(--line); border-radius: var(--radius);
+    color: var(--ink); padding: 3px 8px; font-size: 12px; cursor: pointer; margin-left: 8px;
+  }
+  .btn-retry:hover { background: var(--field); }
 
   .run {
     width: 100%; padding: 11px 16px; font: inherit; font-weight: 600; cursor: pointer;
@@ -402,21 +409,45 @@
      pullback is visible without leaving the bull palette or turning amber —
      amber is reserved for the MA30 trend itself breaking down. */
   .market-state-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 10px; margin-top: 12px;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px; margin-top: 10px;
+  }
+  @media (max-width: 860px) {
+    .market-state-grid {
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    }
   }
   .market-state {
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    padding: 14px 16px; border-radius: var(--radius);
-    border: 1px solid var(--line); font-size: 13.5px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 12px; border-radius: var(--radius);
+    border: 1px solid var(--line); font-size: 13px;
+    cursor: pointer; transition: transform 0.12s ease, border-color 0.12s ease, background-color 0.12s ease;
+    user-select: none;
   }
-  .market-state-grid .market-state { flex-direction: column; align-items: flex-start; gap: 6px; }
-  .market-state.loading { color: var(--muted); }
-  .market-state .ms-name { font-size: 12px; color: var(--muted);
-                            text-transform: uppercase; letter-spacing: .06em; }
+  .market-state:hover {
+    border-color: var(--accent);
+    background: var(--panel);
+    transform: translateY(-2px);
+  }
+  .market-state.loading, .market-state.state-unknown {
+    cursor: default;
+    transform: none !important;
+  }
+  .market-state-grid .market-state {
+    flex-direction: column; align-items: flex-start; gap: 4px;
+    padding: 10px 12px;
+  }
+  .market-state.loading { color: var(--muted); grid-column: 1 / -1; }
+  .market-state .ms-name {
+    font-size: 11px; color: var(--muted); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+  }
   .market-state .ms-badge {
-    font-size: 15px; font-weight: 700; letter-spacing: .02em;
-    padding: 4px 12px; border-radius: 20px; color: #fff;
+    font-size: 13px; font-weight: 700; letter-spacing: .02em;
+    padding: 3px 10px; border-radius: 16px; color: #fff;
+    white-space: nowrap;
   }
   .market-state.state-bull      .ms-badge { background: var(--q-leading); }
   .market-state.state-bull-warn .ms-badge { background: var(--q-leading-dim); }
@@ -424,7 +455,9 @@
   .market-state.state-amber     .ms-badge { background: var(--q-weakening); color: #1a1400; }
   .market-state.state-unknown   .ms-badge { background: var(--muted); }
   .market-state .ms-bench {
+    font-size: 12px;
     font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
+    white-space: nowrap;
   }
   .market-state .ms-detail { color: var(--muted); flex-basis: 100%; }
 </style>
@@ -448,13 +481,22 @@
   <div id="view-rotation" class="hidden">
 
     <div class="panel intro-panel">
-      <div class="legend">Contexto de mercado</div>
-      <p class="intro-lede">
-        Antes de buscar una acción concreta, el contexto tiene que acompañar:
-        <b>el mercado, el sector y la industria</b> explican gran parte de su
-        movimiento antes de que el gráfico individual entre en juego.
-      </p>
-      <div class="intro-flow">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+        <div style="flex:1; min-width:280px;">
+          <div class="legend">Contexto de mercado</div>
+          <p class="intro-lede" style="margin-bottom:0;">
+            Antes de buscar una acción concreta, el contexto tiene que acompañar:
+            <b>el mercado, el sector y la industria</b> explican gran parte de su
+            movimiento antes de que el gráfico individual entre en juego.
+          </p>
+        </div>
+        <div>
+          <button type="button" id="reload-market-context" class="run" style="width:auto; padding:7px 16px; font-size:13px; display:inline-flex; align-items:center; gap:6px;">
+            <span id="reload-icon">🔄</span> <span id="reload-text">Recargar datos</span>
+          </button>
+        </div>
+      </div>
+      <div class="intro-flow" style="margin-top:16px;">
         <span class="step"><b>1. Mercado</b> — ¿el conjunto acompaña?</span>
         <span class="arrow">→</span>
         <span class="step"><b>2. Sectores</b> — ¿dónde está entrando el dinero?</span>
@@ -467,43 +509,78 @@
       <div class="legend">Estado del mercado general</div>
       <div class="desc">
         <p>
-          Antes de mirar sectores, el mercado en su conjunto tiene que
-          respaldar la operación. Se calculan al entrar en esta página, sobre
-          el S&amp;P 500, el Nasdaq 100, el Dow Jones y el Russell 2000, cada
-          uno contra su propia MA30 semanal. Lo calculamos de la siguiente forma (simple pero efectiva):
+          Antes de mirar sectores, el mercado en su conjunto tiene que respaldar la operación.
+          Evaluamos la salud y dirección del mercado en dos horizontes temporales complementarios:
+          <b>largo plazo</b> (tendencia primaria con la MA30 semanal) y <b>medio plazo</b> (tendencia intermedia con la MA10 semanal).
+          El análisis incluye en primer lugar el <b>S&amp;P 500 Equal Weight (RSP)</b> para evaluar la participación real
+          del mercado sin la distorsión del peso por capitalización, seguido de <b>S&amp;P 500 (SPY)</b>, <b>Nasdaq 100 (QQQ)</b>,
+          <b>Dow Jones (DIA)</b> y <b>Russell 2000 (IWM)</b>:
           <ul>
-            <li><b>Alcista 1</b> — cierre por encima de la MA30 semanal, con la MA30 ascendente, y cierre igual o por encima de la MA10 semanal.</li>
-            <li><b>Alcista 2</b> — igual que Alcista 1, pero con el cierre por debajo de la MA10 semanal (la línea de aviso de Weinstein). El semáforo sigue en verde, pero más apagado: la tendencia de fondo aguanta, aunque ya hay una grieta que vigilar.</li>
-            <li><b>Bajista</b> — cierre por debajo de la MA30 semanal, con la MA30 descendente.</li>
-            <li><b>Corrección</b> — ni lo uno ni lo otro ahora mismo, y la última lectura clara fue alcista.</li>
-            <li><b>Formando base</b> — ni lo uno ni lo otro ahora mismo, y la última lectura clara fue bajista.</li>
+            <li><b>Alcista</b> — Cierre por encima de la media móvil semanal con la media en pendiente ascendente (&gt; +0.5%).</li>
+            <li><b>Bajista</b> — Cierre por debajo de la media móvil semanal con la media en pendiente descendente (&lt; -0.5%).</li>
+            <li><b>Corrección</b> — Consolidación o descanso dentro de una tendencia alcista previa.</li>
+            <li><b>Formando base</b> — Consolidación o estabilización tras una tendencia bajista previa.</li>
           </ul>
         </p>
       </div>
 
-      <div id="market-state-wrap" class="market-state-grid">
-        <div class="market-state loading">Calculando el estado de los mercados…</div>
+      <div style="margin-top:18px;">
+        <div style="font-weight:600; font-size:14px; margin-bottom:8px; display:flex; align-items:baseline; gap:8px;">
+          <span>Largo plazo (MA30 semanal)</span>
+          <span style="font-size:12px; font-weight:normal; color:var(--muted);">— Tendencia primaria de fondo</span>
+        </div>
+        <div id="market-state-long-wrap" class="market-state-grid">
+          <div class="market-state loading">Calculando el estado de largo plazo…</div>
+        </div>
+      </div>
+
+      <div style="margin-top:22px;">
+        <div style="font-weight:600; font-size:14px; margin-bottom:8px; display:flex; align-items:baseline; gap:8px;">
+          <span>Medio plazo (MA10 semanal)</span>
+          <span style="font-size:12px; font-weight:normal; color:var(--muted);">— Tendencia intermedia (aviso de Weinstein)</span>
+        </div>
+        <div id="market-state-med-wrap" class="market-state-grid">
+          <div class="market-state loading">Calculando el estado de medio plazo…</div>
+        </div>
       </div>
 
     </div>
 
-      <div class="panel">
+    <div class="panel">
       <div class="legend">Sectores líderes (Weinstein)</div>
       <div class="desc">
         <p>
-          Weinstein: Comprar solo en sectores que estén en <b>Etapa 2</b> y
-          con <b>fuerza relativa positiva</b> frente al mercado. Este ranking
-          es ese filtro exacto, aplicado a los 11 sectores.
+          Weinstein: Comprar solo en sectores que estén en <b>Etapa 2</b> y con <b>fuerza relativa (RS) positiva</b> frente al mercado.
+          Este ranking aplica ese filtro exacto sobre los 11 sectores SPDR del S&amp;P 500.
         </p>
+        <p>
+          <b>Cálculo de Fuerza Relativa (Mansfield RS):</b>
+          Comparamos el rendimiento semanal de cada ETF sectorial respecto al <b>S&amp;P 500 total-return (SPY)</b>,
+          alineando precios y dividendos homogéneamente:
+          <br>
+          <code>RP = (Precio ETF Sector / Precio SPY) × 100</code> &nbsp;|&nbsp;
+          <code>Mansfield RS = ((RP / SMA(RP, N sem)) - 1) × 100</code>
+          <br>
+          Un <b>Mansfield RS &gt; 0</b> confirma que el sector está batiendo al mercado respecto a su norma de las últimas <i>N</i> semanas.
+        </p>
+      </div>
+
+      <div style="margin: 16px 0 14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <span style="font-size:13px; font-weight:600; color:var(--muted);">Horizonte temporal RS:</span>
+        <div class="seg" role="group" aria-label="Plazo Mansfield RS" style="max-width:460px;">
+          <button type="button" id="rs-tf-52" class="rs-tf-btn" data-weeks="52" aria-pressed="true">Largo plazo (52 sem)</button>
+          <button type="button" id="rs-tf-26" class="rs-tf-btn" data-weeks="26" aria-pressed="false">Medio plazo (26 sem)</button>
+          <button type="button" id="rs-tf-13" class="rs-tf-btn" data-weeks="13" aria-pressed="false">Corto plazo (13 sem)</button>
+        </div>
       </div>
 
       <div id="sector-leaders-status" class="desc" style="margin-bottom:10px;"></div>
 
-            <div class="scroll">
+      <div class="scroll">
         <table id="sector-leaders-table"></table>
       </div>
 
-      <div class="legend" style="margin-top:20px;">Últimas 6 semanas</div>
+      <div class="legend" style="margin-top:24px;">Últimas 6 semanas</div>
       <div id="sector-leaders-trail-status" class="desc"></div>
       <div class="scroll">
         <table id="sector-leaders-trail-table"></table>
@@ -721,53 +798,77 @@ function sortForHunting(sectors) {
 
 // ---------- Market state (Sector Rotation, step 1) ----------
 // Mirrors the regime values src/benchmarks.py::market_state_for_symbol() can
-// return. Change both together.
+// return. Clean 4-state Weinstein traffic light (green/red/yellow/yellow).
 const MARKET_STATE_META = {
-  bull:            { emoji: "🟢", label: "ALCISTA 1",     cls: "state-bull" },
-  bull_below_ma10: { emoji: "🟢", label: "ALCISTA 2",     cls: "state-bull-warn" },
-  bear:            { emoji: "🔴", label: "BAJISTA",       cls: "state-bear"},
-  amber_from_bull: { emoji: "🟡", label: "CORRECCIÓN",    cls: "state-amber"},
-  amber_from_bear: { emoji: "🟡", label: "FORMANDO BASE", cls: "state-amber"},
+  bull:            { emoji: "🟢", label: "ALCISTA",       cls: "state-bull" },
+  bear:            { emoji: "🔴", label: "BAJISTA",       cls: "state-bear" },
+  amber_from_bull: { emoji: "🟡", label: "CORRECCIÓN",    cls: "state-amber" },
+  amber_from_bear: { emoji: "🟡", label: "FORMANDO BASE", cls: "state-amber" },
   unknown:         { emoji: "⚪", label: "SIN DATOS",      cls: "state-unknown" },
 };
 
+function renderMarketCards(markets) {
+  if (!markets || !markets.length) {
+    return '<div class="market-state state-unknown">Sin datos disponibles.</div>';
+  }
+  return markets.map(m => {
+    const meta = MARKET_STATE_META[m.regime] || MARKET_STATE_META.unknown;
+    const bench = esc(m.benchmark || "");
+    const clickAttr = bench ? `onclick="window.open('/market-chart/${bench}', '_blank')"` : "";
+    const titleAttr = bench ? `title="Haz clic para ver el gráfico semanal de ${bench} (MA10, MA30, Volumen, MACD)"` : "";
+    return `<div class="market-state ${meta.cls}" ${clickAttr} ${titleAttr}>`
+         + `<span class="ms-name">${esc(m.name)}</span>`
+         + `<span class="ms-badge">${meta.emoji} ${meta.label}</span>`
+         + `<span class="ms-bench">${bench}`
+         + `${m.close != null ? " — " + Number(m.close).toFixed(2) : ""}</span>`
+         + `</div>`;
+  }).join("");
+}
+
 async function loadMarketState() {
-  const wrap = $("market-state-wrap");
-  if (!wrap) return;
-  wrap.innerHTML = '<div class="market-state loading">Calculando el estado de los mercados…</div>';
+  const longWrap = $("market-state-long-wrap");
+  const medWrap = $("market-state-med-wrap");
+  if (!longWrap && !medWrap) return;
+  if (longWrap) longWrap.innerHTML = '<div class="market-state loading">Calculando el estado de largo plazo…</div>';
+  if (medWrap) medWrap.innerHTML = '<div class="market-state loading">Calculando el estado de medio plazo…</div>';
   try {
     const res = await fetch("/api/market-state");
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || "market-state failed");
-    const markets = data.markets || [];
-    wrap.innerHTML = markets.map(m => {
-      const meta = MARKET_STATE_META[m.regime] || MARKET_STATE_META.unknown;
-      return `<div class="market-state ${meta.cls}">`
-           + `<span class="ms-name">${esc(m.name)}</span>`
-           + `<span class="ms-badge">${meta.emoji} ${meta.label}</span>`
-           + `<span class="ms-bench">${esc(m.benchmark)}`
-           + `${m.close != null ? " — " + m.close.toFixed(2) : ""}</span>`
-           + `<span class="ms-detail">${esc(meta.detail)}</span>`
-           + `</div>`;
-    }).join("");
+    if (longWrap) longWrap.innerHTML = renderMarketCards(data.long_term || data.markets || []);
+    if (medWrap) medWrap.innerHTML = renderMarketCards(data.medium_term || []);
   } catch (e) {
-    wrap.innerHTML = `<div class="market-state state-unknown">No se pudo calcular el estado de los mercados: ${esc(e.message)}</div>`;
+    const errHtml = `<div class="market-state state-unknown">No se pudo calcular el estado: ${esc(e.message)} <button type="button" class="btn-retry" onclick="loadMarketState()">Reintentar</button></div>`;
+    if (longWrap) longWrap.innerHTML = errHtml;
+    if (medWrap) medWrap.innerHTML = errHtml;
   }
 }
 
-async function loadSectorLeaders() {
+let CURRENT_RS_WEEKS = 52;
+
+function setRsTimeframe(weeks) {
+  CURRENT_RS_WEEKS = weeks;
+  document.querySelectorAll(".rs-tf-btn").forEach(btn => {
+    btn.setAttribute("aria-pressed", parseInt(btn.dataset.weeks) === weeks);
+  });
+  loadSectorLeaders(CURRENT_RS_WEEKS);
+  loadSectorLeadersTrail(CURRENT_RS_WEEKS);
+}
+
+async function loadSectorLeaders(weeks = CURRENT_RS_WEEKS) {
   const status = $("sector-leaders-status");
   const table = $("sector-leaders-table");
-  status.textContent = "Calculando sectores líderes…";
+  if (!status || !table) return;
+  status.textContent = `Calculando sectores líderes (RS ${weeks} sem)…`;
   table.innerHTML = "";
   try {
-    const res = await fetch("/api/sector-leaders");
+    const res = await fetch(`/api/sector-leaders?rs_weeks=${weeks}`);
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || "sector-leaders failed");
 
     const sectors = data.sectors || [];
     status.textContent =
-      `${data.leader_count} de ${data.total_sectors} sectores cumplen Etapa 2 + RS > 0 `;
+      `${data.leader_count} de ${data.total_sectors} sectores cumplen Etapa 2 + RS (${weeks} sem) > 0`;
 
     if (!sectors.length) {
       table.innerHTML = '<tr><td class="leaders-empty">Sin datos de sectores.</td></tr>';
@@ -778,7 +879,7 @@ async function loadSectorLeaders() {
 
     table.innerHTML = "<thead><tr>"
       + "<th>#</th><th>Sector</th><th>Etapa</th>"
-      + '<th class="num">Mansfield RS</th></tr></thead><tbody>'
+      + `<th class="num">Mansfield RS (${weeks} sem)</th></tr></thead><tbody>`
       + sectors.map((s, i) => {
           const stage = s.sector_stage || "unknown";
           return `<tr class="${s.is_leader ? "leader-row" : ""}">`
@@ -792,37 +893,38 @@ async function loadSectorLeaders() {
       + "</tbody>";
   } catch (e) {
     status.textContent = "";
-    table.innerHTML = `<tr><td class="leaders-empty">Error: ${esc(e.message)}</td></tr>`;
+    table.innerHTML = `<tr><td class="leaders-empty">Error: ${esc(e.message)} <button type="button" class="btn-retry" onclick="loadSectorLeaders(CURRENT_RS_WEEKS)">Reintentar</button></td></tr>`;
   }
 }
 
-async function loadSectorLeadersTrail() {
+async function loadSectorLeadersTrail(weeks = CURRENT_RS_WEEKS) {
   const status = $("sector-leaders-trail-status");
   const table = $("sector-leaders-trail-table");
+  if (!status || !table) return;
   status.textContent = "Calculando el histórico…";
   table.innerHTML = "";
   try {
-    const res = await fetch("/api/sector-leaders-history");
+    const res = await fetch(`/api/sector-leaders-history?rs_weeks=${weeks}`);
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || "leaders-history failed");
 
-    const weeks = data.weeks || [];
+    const weeksList = data.weeks || [];
     const sectors = data.sectors || [];
-    if (!weeks.length || !sectors.length) {
+    if (!weeksList.length || !sectors.length) {
       status.textContent = "";
       table.innerHTML = '<tr><td class="leaders-empty">Historial insuficiente.</td></tr>';
       return;
     }
 
-    const lastIdx = weeks.length - 1;
+    const lastIdx = weeksList.length - 1;
     const newThisWeek = sectors.filter(s => {
       const last = s.trail[lastIdx], prev = s.trail[lastIdx - 1];
       return prev && last.is_leader && !prev.is_leader;
     });
     status.textContent = newThisWeek.length
-      ? `${newThisWeek.length} sector(es) nuevo(s) esta semana: `
+      ? `${newThisWeek.length} sector(es) nuevo(s) esta semana (RS ${weeks} sem): `
         + newThisWeek.map(s => esc(s.sector)).join(", ") + "."
-      : "Sin cambios respecto a la semana anterior.";
+      : `Sin cambios de líderes respecto a la semana anterior (RS ${weeks} sem).`;
 
     // Orden: líder hoy primero (por rango de hoy, 1 arriba), luego el resto
     // por nº de semanas como líder.
@@ -841,7 +943,7 @@ async function loadSectorLeadersTrail() {
       : "—";
 
     table.innerHTML = "<thead><tr><th>Sector</th>"
-      + weeks.map(w => `<th class="trail-cell">${esc(weekLabel(w))}</th>`).join("")
+      + weeksList.map(w => `<th class="trail-cell">${esc(weekLabel(w))}</th>`).join("")
       + "</tr></thead><tbody>"
       + ranked.map(s => {
           const last = s.trail[lastIdx], prev = s.trail[lastIdx - 1];
@@ -855,7 +957,25 @@ async function loadSectorLeadersTrail() {
       + "</tbody>";
   } catch (e) {
     status.textContent = "";
-    table.innerHTML = `<tr><td class="leaders-empty">Error: ${esc(e.message)}</td></tr>`;
+    table.innerHTML = `<tr><td class="leaders-empty">Error: ${esc(e.message)} <button type="button" class="btn-retry" onclick="loadSectorLeadersTrail(CURRENT_RS_WEEKS)">Reintentar</button></td></tr>`;
+  }
+}
+
+async function reloadMarketContext() {
+  const btn = $("reload-market-context");
+  const icon = $("reload-icon");
+  const text = $("reload-text");
+  if (btn) btn.disabled = true;
+  if (text) text.textContent = "Recargando…";
+  try {
+    await Promise.allSettled([
+      loadMarketState(),
+      loadSectorLeaders(CURRENT_RS_WEEKS),
+      loadSectorLeadersTrail(CURRENT_RS_WEEKS)
+    ]);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (text) text.textContent = "Recargar datos";
   }
 }
 
@@ -952,9 +1072,13 @@ async function calculateIndustryLeaders() {
 
 async function boot() {
   loadMarketState();
-  loadSectorLeaders();
-  loadSectorLeadersTrail();
+  loadSectorLeaders(CURRENT_RS_WEEKS);
+  loadSectorLeadersTrail(CURRENT_RS_WEEKS);
   checkIndustryLeaders();
+  $("reload-market-context").addEventListener("click", reloadMarketContext);
+  document.querySelectorAll(".rs-tf-btn").forEach(btn => {
+    btn.addEventListener("click", () => setRsTimeframe(parseInt(btn.dataset.weeks)));
+  });
   $("calc-industry-leaders").addEventListener("click", calculateIndustryLeaders);
   $("tab-screen").addEventListener("click", () => switchTab("screen"));
   $("tab-rotation").addEventListener("click", () => switchTab("rotation"));
@@ -1172,6 +1296,14 @@ function switchTab(which) {
   $("tab-rotation").setAttribute("aria-pressed", !screen);
   $("view-screen").classList.toggle("hidden", !screen);
   $("view-rotation").classList.toggle("hidden", screen);
+  if (!screen) {
+    const longWrap = $("market-state-long-wrap");
+    if (longWrap && (longWrap.querySelector(".loading") || longWrap.querySelector(".state-unknown"))) {
+      loadMarketState();
+      loadSectorLeaders(CURRENT_RS_WEEKS);
+      loadSectorLeadersTrail(CURRENT_RS_WEEKS);
+    }
+  }
 }
 
 // ---------- Screener ----------

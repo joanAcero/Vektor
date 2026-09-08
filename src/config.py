@@ -62,8 +62,13 @@ log = logging.getLogger(__name__)
 #   rotation            sectors selected by the RRG monitor
 #   index               union of the market.indices constituent lists
 #   quality             iShares MSCI USA Quality Factor ETF holdings
+#   ibd                 one IBD Digital screen export, read off disk from
+#                       data/ibd/ -- see src/ibd_import.py. The only US source
+#                       that is not fetched live, because IBD's lists are
+#                       behind a subscription.
 #   ticker              an explicit list, diagnostic mode
-US_SOURCES = ("industries", "sectors", "rotation", "index", "quality", "ticker")
+US_SOURCES = ("industries", "sectors", "rotation", "index", "quality", "ibd",
+              "ticker")
 
 # Sources for which market.group means anything.
 GROUPED_US_SOURCES = ("sectors", "industries")
@@ -154,6 +159,29 @@ def validate_indices(keys: Any, *, required: bool) -> list[str]:
     return list(dict.fromkeys(items))
 
 
+def validate_ibd_list(name: Any, *, required: bool) -> str:
+    """Check `market.ibd_list`.
+
+    Presence only, NOT existence on disk. The available list names are whatever
+    files sit in data/ibd/, and this module deliberately does no I/O at load
+    time; src/market_us.py::collect_us_ibd reports the names it actually found
+    when the lookup misses, which is a better error than a stale copy of the
+    directory listing kept here.
+
+    As with market.indices, an empty required value raises instead of
+    defaulting to "ibd50": choosing a universe on your behalf is the silent
+    divergence this module exists to prevent.
+    """
+    text = str(name or "").strip().lower()
+    if not text and required:
+        raise ValueError(
+            "market.source is 'ibd' but market.ibd_list is missing or empty. "
+            "There is deliberately no code default for it. Valid values are "
+            "the file stems in data/ibd/, e.g. 'ibd50' for "
+            "data/ibd/ibd50_2026-09-05.csv.")
+    return text
+
+
 def validate_rotation_quadrants(quadrants: Any, *, required: bool) -> list[str]:
     """Check `quadrants` against the canonical set."""
     items = [str(q).lower().strip() for q in (quadrants or [])]
@@ -190,6 +218,9 @@ class RunConfig:
     # One named Finviz sector/industry instead of the top-N by perf_col. Empty
     # means "rank them" -- the original behaviour.
     us_group: str = ""
+    # Which IBD screen export to read, when us_source == "ibd". The file stem
+    # in data/ibd/ without the date: "ibd50" for ibd50_2026-09-05.csv.
+    us_ibd_list: str = ""
     us_rotation_quadrants: list[str] = field(default_factory=list)
     # History given to the strategy AND to the chart pass. Charts then show
     # only the last run.py::CHART_YEARS of it, so widening this affects the
@@ -226,6 +257,19 @@ class RunConfig:
                         "(it applies to %s only).",
                         self.us_group, self.us_source, list(GROUPED_US_SOURCES))
             self.us_group = ""
+
+        self.us_ibd_list = str(self.us_ibd_list or "").strip().lower()
+        if self.us_ibd_list and self.us_source != "ibd":
+            # Warned and cleared for the same reason as market.group above: a
+            # stale value in flight from the browser should not fail a valid
+            # run, but neither should it sit there looking as if it applied.
+            log.warning("market.ibd_list=%r is ignored when market.source=%r "
+                        "(it applies to 'ibd' only).",
+                        self.us_ibd_list, self.us_source)
+            self.us_ibd_list = ""
+        self.us_ibd_list = validate_ibd_list(
+            self.us_ibd_list,
+            required=(self.market_mode == "us" and self.us_source == "ibd"))
 
         self.us_indices = validate_indices(
             self.us_indices,
@@ -347,6 +391,7 @@ def load_config(path: str | Path, overrides: dict[str, Any] | None = None) -> Ru
         us_top_n_industries=int(market.get("top_n_industries", 0)),
         us_perf_col=market.get("perf_col", "Perf Week"),
         us_group=str(market.get("group", "") or "").strip(),
+        us_ibd_list=str(market.get("ibd_list", "") or "").strip(),
         us_rotation_quadrants=list(market.get("rotation_quadrants", []) or []),
         data_start=data.get("data_start", "2020-01-01"),
         output_dir=data.get("output_dir", "results"),

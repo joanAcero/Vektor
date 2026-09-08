@@ -4,25 +4,41 @@ market_us.py
 US ticker sourcing for the runner.
 
 Public interface (consumed by run.py):
-    collect_us_candidates(top_n, perf_col) -> (tickers: list[str], meta_df: DataFrame)
-    collect_us_by_sector(top_n, perf_col)  -> (tickers, meta_df)
-    collect_us_by_rotation(loader, states) -> (tickers, meta_df)
-    collect_explicit_tickers(tickers)      -> (tickers, meta_df)
+    collect_us_candidates(top_n, perf_col)      -> (tickers: list[str], meta_df)
+    collect_us_by_sector(top_n, perf_col)       -> (tickers, meta_df)
+    collect_us_by_rotation(loader, quadrants)   -> (tickers, meta_df)
+    collect_us_named_group(kind, name)          -> (tickers, meta_df)
+    collect_us_sp500()                          -> (tickers, meta_df)
+    collect_us_ibd(list_name, as_of)            -> (tickers, meta_df)
+    collect_explicit_tickers(tickers)           -> (tickers, meta_df)
 
 meta_df carries [Ticker, Sector, Industry] for enrichment. The runner maps those
 columns defensively, so a partial meta_df (e.g. Finviz dropped a column) will not
-crash the run.
+crash the run. collect_us_ibd adds a fourth column, "IBD Composite"; see its
+docstring for why that is safe and what it costs.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence   # was annotated but never imported
+from datetime import date
 
 import pandas as pd
 
 from src.finviz_engine import FinvizEngine
 
 log = logging.getLogger(__name__)
+
+#: The meta_df contract, in one place. Eight literal copies of this list used to
+#: be scattered through the file, which is how one of them (collect_us_named_
+#: group) came to call an `empty_details()` helper that does not exist.
+META_COLUMNS = ["Ticker", "Sector", "Industry"]
+
+
+def _empty_meta() -> pd.DataFrame:
+    """An empty meta_df with the contracted columns."""
+    return pd.DataFrame(columns=META_COLUMNS)
 
 
 def collect_us_by_sector(top_n: int = 3,
@@ -32,7 +48,7 @@ def collect_us_by_sector(top_n: int = 3,
     sectors = finviz.get_top_sectors(top_n=top_n, col_target=perf_col)
     if not sectors:
         log.error("Could not obtain sectors from Finviz.")
-        return [], pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
+        return [], _empty_meta()
     log.info("Top sectors: %s", sectors)
     frames = []
     for sector in sectors:
@@ -41,7 +57,7 @@ def collect_us_by_sector(top_n: int = 3,
             frames.append(details)
     if not frames:
         log.warning("No tickers for the selected sectors.")
-        return [], pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
+        return [], _empty_meta()
     meta_df = pd.concat(frames, ignore_index=True).drop_duplicates(subset="Ticker")
     tickers = meta_df["Ticker"].tolist()
     log.info("Total US candidates (sectors): %d", len(tickers))
@@ -83,12 +99,11 @@ def collect_us_by_rotation(loader,
     """
     from src.rotation import sector_rotation
 
-    empty = pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
     wanted = list(quadrants)
     if not wanted:
         log.error("collect_us_by_rotation called with an empty quadrant list; "
                   "check market.us_rotation_quadrants in your config.")
-        return [], empty
+        return [], _empty_meta()
 
     finviz = FinvizEngine()
 
@@ -96,7 +111,7 @@ def collect_us_by_rotation(loader,
     if not sectors:
         log.error("Sector rotation returned nothing; cannot drive candidate "
                   "selection.")
-        return [], empty
+        return [], _empty_meta()
 
     picked = [s for s in sectors if s["quadrant"] in wanted]
     if not picked:
@@ -109,7 +124,7 @@ def collect_us_by_rotation(loader,
         log.info("No sectors currently in quadrant(s) %s; nothing to scan. "
                  "Present this week: %s", wanted,
                  ", ".join(f"{n} {q}" for q, n in sorted(census.items())))
-        return [], empty
+        return [], _empty_meta()
 
     log.info("Rotation-driven sectors (%s): %s", "/".join(wanted),
              [f"{s['etf']} {s['sector']} [{s['sector_stage']}]" for s in picked])
@@ -133,7 +148,7 @@ def collect_us_by_rotation(loader,
 
     if not frames:
         log.warning("No tickers found across rotation-selected sectors.")
-        return [], empty
+        return [], _empty_meta()
 
     meta_df = pd.concat(frames, ignore_index=True).drop_duplicates(subset="Ticker")
     tickers = meta_df["Ticker"].tolist()
@@ -166,7 +181,7 @@ def collect_us_candidates(top_n: int = 0,
         meta_df = finviz.get_all_market_details()
         if meta_df.empty:
             log.error("Could not obtain the market universe from Finviz.")
-            return [], pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
+            return [], _empty_meta()
         tickers = meta_df["Ticker"].tolist()
         log.info("Total US candidates (full market): %d", len(tickers))
         return tickers, meta_df
@@ -174,7 +189,7 @@ def collect_us_candidates(top_n: int = 0,
     industries = finviz.get_top_industries(top_n=top_n, col_target=perf_col)
     if not industries:
         log.error("Could not obtain industries from Finviz.")
-        return [], pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
+        return [], _empty_meta()
     log.info("Top industries: %s", industries)
 
     frames: list[pd.DataFrame] = []
@@ -185,7 +200,7 @@ def collect_us_candidates(top_n: int = 0,
 
     if not frames:
         log.warning("No tickers for the selected industries.")
-        return [], pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
+        return [], _empty_meta()
 
     meta_df = pd.concat(frames, ignore_index=True).drop_duplicates(subset="Ticker")
     tickers = meta_df["Ticker"].tolist()
@@ -193,12 +208,17 @@ def collect_us_candidates(top_n: int = 0,
     return tickers, meta_df
 
 
-
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
 # Wikipedia writes class shares with a dot (BRK.B, BF.B); Yahoo wants a hyphen
 # (BRK-B, BF-B). Silently wrong tickers download as empty frames and vanish
 # from the scan with no error, so the translation is explicit and logged.
+#
+# NOTE: src/ibd_import.py::normalize_ticker now applies the same rule for the
+# IBD exports. Two implementations of one convention is exactly the shadowing
+# this repo tries to avoid; the right fix is a src/symbols.py that both import,
+# together with market_intl.py's equivalent. Not done here because it touches
+# call sites this change does not otherwise open.
 _SP500_SYMBOL_FIXUPS = str.maketrans({".": "-"})
 
 
@@ -231,14 +251,12 @@ def collect_us_sp500() -> tuple[list[str], pd.DataFrame]:
     """
     from src.market_intl import read_wiki_tables
 
-    empty = pd.DataFrame(columns=["Ticker", "Sector", "Industry"])
-
     try:
         tables = read_wiki_tables(SP500_WIKI_URL)
     except Exception:  # noqa: BLE001
         log.exception("Could not fetch the S&P 500 constituents page (%s).",
                       SP500_WIKI_URL)
-        return [], empty
+        return [], _empty_meta()
 
     df = next((t for t in tables if "Symbol" in t.columns), None)
     if df is None:
@@ -246,7 +264,7 @@ def collect_us_sp500() -> tuple[list[str], pd.DataFrame]:
         log.error("No S&P 500 table with a 'Symbol' column at %s. Wikipedia's "
                   "layout has probably changed; first tables seen: %s",
                   SP500_WIKI_URL, found)
-        return [], empty
+        return [], _empty_meta()
 
     sector_col = "GICS Sector" if "GICS Sector" in df.columns else None
     industry_col = ("GICS Sub-Industry" if "GICS Sub-Industry" in df.columns
@@ -279,7 +297,7 @@ def collect_us_sp500() -> tuple[list[str], pd.DataFrame]:
 
     if not rows:
         log.warning("S&P 500 table parsed but yielded no tickers.")
-        return [], empty
+        return [], _empty_meta()
 
     meta_df = pd.DataFrame(rows)
     tickers = meta_df["Ticker"].tolist()
@@ -296,46 +314,55 @@ def collect_us_sp500() -> tuple[list[str], pd.DataFrame]:
     return tickers, meta_df
 
 
-def collect_us_named_group(kind: str, name: str) -> tuple[list[str], pd.DataFrame]:
+def collect_us_ibd(list_name: str = "ibd50",
+                   as_of: date | None = None) -> tuple[list[str], pd.DataFrame]:
     """
-    Collect every liquid ticker in ONE named Finviz sector or industry.
+    One of IBD Digital's screen exports, read off disk.
 
-    The counterpart to collect_us_by_sector / collect_us_candidates, which pick
-    groups FOR you by performance. This is for when you already know which
-    group you want to look inside — "show me every basing name in Utilities"
-    is a different question from "show me the strongest groups", and answering
-    it by setting top_n high enough that Utilities happens to be included also
-    drags in everything above it.
+    Unlike every other collector here, this universe is NOT fetched live: IBD's
+    lists are behind a subscription, so the CSV/XLSX is downloaded by hand into
+    data/ibd/ and named '<list>_YYYY-MM-DD.csv'. Two consequences worth holding
+    on to:
 
-    `kind` is "sector" or "industry"; `name` is Finviz's own label for the
-    group, exactly as it appears in its group screener. It is NOT validated
-    against a list here: Finviz owns that vocabulary, it changes, and a
-    hardcoded copy is the same trap FINVIZ_SECTOR_NAME above already documents.
-    A name Finviz does not recognise comes back as an empty result and is
-    reported as such — visible and cheap to fix — rather than silently
-    scanning something else.
+    * IT IS ONLY AS FRESH AS THE LAST DOWNLOAD. The other US sources refresh
+      themselves; this one goes stale silently and looks identical when it
+      does. The as-of date is logged on every run for that reason.
+
+    * IT IS ALREADY A FILTERED UNIVERSE. IBD selected these names on earnings
+      growth and relative strength before you saw them. That is the point --
+      but it also means a stage screen run over the IBD 50 and the same screen
+      run over the S&P 500 are not measuring the same thing, and the hit rates
+      are not comparable.
+
+    meta_df carries Sector and Industry BLANK: the export does not include
+    them, and IBD's own industry-group taxonomy is not Finviz's or GICS's, so
+    filling them from here would put a third vocabulary in a column that
+    already holds two. It also carries a fourth column, "IBD Composite" (1-99
+    percentile rank), which the runner's defensive column mapping carries
+    through to the results frame. Whether it is DISPLAYED depends on the
+    strategy's declared display_columns -- see the note in src/instrument.py.
+
+    `as_of=None` takes the newest snapshot on disk; pass a date to take the
+    newest snapshot at or before it.
     """
-    kind = str(kind).strip().lower()
-    name = str(name).strip()
-    if kind not in ("sector", "industry"):
-        raise ValueError(f"kind must be 'sector' or 'industry', got {kind!r}")
-    if not name:
-        raise ValueError("collect_us_named_group() needs a group name.")
+    from src.ibd_import import COMPOSITE_COLUMN, load_ibd_list
 
-    finviz = FinvizEngine()
-    log.info("Scanning a single %s: %s", kind, name)
-    details = (finviz.get_ticker_details_in_sector(name) if kind == "sector"
-               else finviz.get_ticker_details_in_industry(name))
+    try:
+        snapshot = load_ibd_list(list_name, as_of=as_of)
+    except (FileNotFoundError, ValueError) as e:
+        log.error("Could not load IBD list %r: %s", list_name, e)
+        return [], _empty_meta()
 
-    if details is None or details.empty:
-        log.warning("Finviz returned no tickers for %s %r. Check the spelling "
-                    "against Finviz's own group names — an unknown group and an "
-                    "empty group look identical from here.", kind, name)
-        return [], empty_details()
+    meta_df = snapshot.frame.copy()
+    meta_df["Sector"] = ""
+    meta_df["Industry"] = ""
+    meta_df = meta_df[META_COLUMNS + [COMPOSITE_COLUMN]]
 
-    meta_df = details.drop_duplicates(subset="Ticker")
     tickers = meta_df["Ticker"].tolist()
-    log.info("Total US candidates (%s=%s): %d", kind, name, len(tickers))
+    log.info("Total US candidates (IBD %s, as of %s%s): %d",
+             snapshot.list_name, snapshot.as_of,
+             "" if snapshot.dated_filename else ", from file mtime -- UNDATED",
+             len(tickers))
     return tickers, meta_df
 
 
@@ -374,10 +401,9 @@ def collect_us_named_group(kind: str, name: str) -> tuple[list[str], pd.DataFram
         log.warning("Finviz returned no tickers for %s %r. Check the spelling "
                     "against Finviz's own group names — an unknown group and an "
                     "empty group look identical from here.", kind, name)
-        return [], empty_details()
+        return [], _empty_meta()
 
     meta_df = details.drop_duplicates(subset="Ticker")
     tickers = meta_df["Ticker"].tolist()
     log.info("Total US candidates (%s=%s): %d", kind, name, len(tickers))
     return tickers, meta_df
-

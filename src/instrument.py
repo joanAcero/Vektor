@@ -36,13 +36,21 @@ import pandas as pd
 # They are appended centrally by results_columns() below.
 METADATA_COLUMNS = ("Name", "Sector", "Industry")
 
+# Columns a PARTICULAR source supplies and the others do not -- vendor ratings,
+# not universal security metadata, which is why they are not in
+# METADATA_COLUMNS. Listing one here costs nothing for the sources that do not
+# produce it: results_columns() filters against the frame's actual columns, so
+# an absent column is simply never emitted.
+SOURCE_COLUMNS = ("IBD Composite",)
+
 
 def results_columns(strategy_display_columns: Iterable[str],
                     available: Iterable[str]) -> list[str]:
     """Ordered column list for the results table, the CSV and the API payload.
 
     Identity, then price, then whatever the strategy declared, then any market
-    metadata the strategy did not already position itself. Deduplicated and
+    metadata the strategy did not already position itself, then any
+    source-specific column the frame happens to carry. Deduplicated and
     filtered to what the frame actually has -- so a strategy that still lists
     "Sector" in display_columns keeps its chosen position and does not get a
     second copy at the end.
@@ -52,7 +60,7 @@ def results_columns(strategy_display_columns: Iterable[str],
     a column the table doesn't have".
     """
     ordered = ["Market", "Ticker", "Name", "Price",
-               *strategy_display_columns, *METADATA_COLUMNS]
+               *strategy_display_columns, *METADATA_COLUMNS, *SOURCE_COLUMNS]
     have = set(available)
     return [c for c in dict.fromkeys(ordered) if c in have]
 

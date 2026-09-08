@@ -13,5 +13,4 @@ vektor-venv/
 data/
 results/
 cache/
-
-
+*.pyc

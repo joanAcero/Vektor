@@ -170,7 +170,7 @@
   .field .name { font-size: 13px; margin-bottom: 4px; }
   .field .help { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
-  select, input[type=number], input[type=text] {
+  select, input[type=number], input[type=text], input[type=date] {
     width: 100%; padding: 8px 10px;
     background: var(--field); color: var(--ink);
     border: 1px solid var(--line); border-radius: var(--radius);
@@ -181,6 +181,13 @@
   }
   select:disabled { opacity: .55; }
   input[type=checkbox] { accent-color: var(--accent); margin-right: 8px; }
+  input[type=file] { font: inherit; font-size: 13px; color: var(--muted); width: 100%; }
+  .subpanel {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px; margin-top: 10px;
+  }
+  .subpanel .name { font-size: 13px; margin-bottom: 4px; }
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
   .check { display: flex; align-items: center; font-size: 13px; }
@@ -639,6 +646,7 @@
               <option value="quality" data-quality="us">Quality</option>
               <option value="sectors">Sectors</option>
               <option value="industries">Industries</option>
+              <option value="ibd">IBD (exported screen)</option>
               <option value="ticker">Ticker</option>
               <option value="rotation">Rotation (RRG-selected sectors)</option>
             </select>
@@ -687,6 +695,44 @@
                 <option value="Perf Year">Perf Year</option>
               </select>
               <div class="help">Finviz performance column used to rank groups.</div>
+            </div>
+          </div>
+
+          <!-- IBD list picker. Options come from /api/ibd-lists, which lists
+               data/ibd/ -- never from a list in this file. -->
+          <div class="field hidden" id="ibd-opts">
+            <div class="name">Lista IBD</div>
+            <select id="us_ibd_list">
+              <option value="">Cargando…</option>
+            </select>
+            <div class="help">
+              Se usa el snapshot más reciente. La fecha va en el nombre porque
+              esta fuente no se refresca sola.
+            </div>
+
+            <div class="subpanel">
+              <div class="name">Subir un export nuevo</div>
+              <input type="file" id="ibd-file" accept=".csv,.txt,.xlsx,.xls">
+              <div class="row-2" style="margin-top:10px;">
+                <div>
+                  <div class="name">Nombre de la lista</div>
+                  <input type="text" id="ibd-upload-name" list="ibd-known-names"
+                         placeholder="ibd50" autocomplete="off">
+                  <datalist id="ibd-known-names"></datalist>
+                </div>
+                <div>
+                  <div class="name">Fecha del export</div>
+                  <input type="date" id="ibd-upload-date">
+                </div>
+              </div>
+              <button type="button" class="btn-retry" id="ibd-upload-btn"
+                      style="margin:10px 0 0 0;">Subir</button>
+              <div id="ibd-upload-status" class="help"></div>
+              <div class="help">
+                La fecha no viene dentro del fichero: IBD no la exporta. Por
+                defecto es hoy — corrígela si el export es de otro día, o los
+                snapshots quedarán mal ordenados.
+              </div>
             </div>
           </div>
 
@@ -1086,6 +1132,15 @@ async function boot() {
   $("mode-intl").addEventListener("click", () => setMode("international"));
   $("us_source").addEventListener("change", onUsSourceChange);
   $("us_group").addEventListener("change", updateUsSource);
+  $("ibd-file").addEventListener("change", onIbdFilePick);
+  $("ibd-upload-btn").addEventListener("click", uploadIbdFile);
+  $("ibd-upload-name").addEventListener("input", (e) => {
+    e.target.dataset.touched = e.target.value ? "1" : "";
+  });
+  // Defaulted client-side, not server-side, so the value is VISIBLE and
+  // editable before it is committed to a filename.
+  $("ibd-upload-date").value = new Date().toISOString().slice(0, 10);
+  $("ibd-upload-date").max = $("ibd-upload-date").value;
   $("intl_source").addEventListener("change", updateIntlSource);
   $("strategy").addEventListener("change", renderParams);
   $("run").addEventListener("click", runScreen);
@@ -1202,6 +1257,88 @@ function setMode(m) {
   $("intl-opts").classList.toggle("hidden", m !== "international");
 }
 
+// ---------- IBD list picker ----------
+// Fetched once per page load from /api/ibd-lists, which reads data/ibd/. The
+// as-of date is shown next to each name: this source does not refresh itself,
+// and a three-week-old IBD 50 looks exactly like a fresh one in the results.
+let IBD_LISTS_LOADED = false;
+
+async function loadIbdLists(force) {
+  if (IBD_LISTS_LOADED && !force) return;
+  const sel = $("us_ibd_list");
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">Cargando…</option>';
+  try {
+    const res = await fetch("/api/ibd-lists");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    const names = Object.keys(data.lists || {});
+    // The datalist is filled even when there are no lists yet: it is what
+    // stops the same list arriving as "ibd50" today and "ibd_50" next week,
+    // which would silently split the snapshot history in two.
+    $("ibd-known-names").innerHTML =
+      names.map(n => `<option value="${n}">`).join("");
+    if (!names.length) {
+      sel.innerHTML = '<option value="">Sin exports — sube uno abajo</option>';
+      return;
+    }
+    sel.innerHTML = names.map(n => {
+      const dates = data.lists[n] || [];
+      const asOf = dates[0] ? ` — ${dates[0]}` : "";
+      const extra = dates.length > 1 ? ` (${dates.length} snapshots)` : "";
+      return `<option value="${n}">${n}${asOf}${extra}</option>`;
+    }).join("");
+    if (keep && names.includes(keep)) sel.value = keep;
+    IBD_LISTS_LOADED = true;
+  } catch (e) {
+    sel.innerHTML = `<option value="">Error: ${e.message}</option>`;
+  }
+}
+
+// Pre-fill the list name from the filename, slugified the same way the server
+// does. Only while the user has not typed one: overwriting their own choice on
+// every file pick is worse than a slightly wrong default.
+function onIbdFilePick() {
+  const file = $("ibd-file").files[0];
+  const nameField = $("ibd-upload-name");
+  if (!file || nameField.dataset.touched === "1") return;
+  const stem = file.name.replace(/\.[^.]+$/, "");
+  nameField.value = stem.toLowerCase()
+                        .replace(/[^a-z0-9]+/g, "_")
+                        .replace(/^_+|_+$/g, "");
+}
+
+async function uploadIbdFile() {
+  const btn = $("ibd-upload-btn");
+  const status = $("ibd-upload-status");
+  const file = $("ibd-file").files[0];
+  if (!file) { status.textContent = "Elige un fichero primero."; return; }
+
+  const body = new FormData();
+  body.append("file", file);
+  body.append("list_name", $("ibd-upload-name").value);
+  body.append("as_of", $("ibd-upload-date").value);
+
+  btn.disabled = true;
+  status.textContent = "Subiendo y validando…";
+  try {
+    const res = await fetch("/api/ibd-upload", { method: "POST", body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    const replaced = (data.replaced || []).length
+      ? ` (reemplaza ${data.replaced.join(", ")})` : "";
+    status.textContent =
+      `${data.filename}: ${data.count} tickers${replaced}.`;
+    await loadIbdLists(true);
+    $("us_ibd_list").value = data.list_name;
+    $("ibd-file").value = "";
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- Finviz group picker ----------
 // Names are fetched from /api/groups, never listed here: Finviz owns that
 // vocabulary and it changes. Cached per kind for the life of the page.
@@ -1268,9 +1405,12 @@ function updateUsSource() {
   const src = $("us_source").value;
   const isTicker = src === "ticker";
   const isIndex = src === "index";
+  const isIbd = src === "ibd";
   const isGrouped = src === "sectors" || src === "industries";
   const named = isGrouped && $("us_group").value !== "";
 
+  $("ibd-opts").classList.toggle("hidden", !isIbd);
+  if (isIbd) loadIbdLists();
   $("index-opts").classList.toggle("hidden", !isIndex);
   $("group-opts").classList.toggle("hidden", !isGrouped);
   // The performance ranking chooses WHICH groups to scan. Once you have named
@@ -1324,6 +1464,8 @@ async function runScreen() {
     } else if (src === "index") {
       m.indices = [...document.querySelectorAll("#us-indices input:checked")]
                     .map(c => c.value);
+    } else if (src === "ibd") {
+      m.ibd_list = $("us_ibd_list").value;
     } else if (src === "sectors" || src === "industries") {
       m.group = $("us_group").value;
       m.top_n_industries = parseInt($("top_n").value, 10);

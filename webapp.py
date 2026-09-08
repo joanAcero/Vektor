@@ -9,6 +9,8 @@ Endpoints:
   GET  /api/strategies          -> strategies, param schemas, target options
   GET  /api/groups?kind=...     -> Finviz sector or industry names, for the picker
   POST /api/run                 -> build a RunConfig, call run(cfg), return JSON
+  GET  /api/ibd-lists           -> IBD screen exports present in data/ibd/
+  POST /api/ibd-upload          -> accept an IBD export and file it in data/ibd/
   GET  /api/rotation            -> RRG snapshot of the 11 SPDR sector ETFs
   GET  /api/rotation/chart.png  -> the RRG image
   GET  /api/stage-chart/<SYM>.png -> a weekly chart with stage bands
@@ -43,7 +45,10 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+import tempfile
 import time
+from datetime import date, datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -63,7 +68,21 @@ OUTPUT_DIR = "results"
 INDUSTRY_LEADERS_PROGRESS_PATH = Path(OUTPUT_DIR) / "industry_leaders_progress.json"
 app = Flask(__name__, static_folder="web", static_url_path="")
 
+# An IBD screen export is a few KB. The cap is here so a mis-picked file fails
+# at the socket instead of being buffered into memory, and it is generous
+# enough that no legitimate export ever hits it.
+IBD_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = IBD_UPLOAD_MAX_BYTES
+
 load_strategies("strategies")
+
+
+@app.errorhandler(413)
+def _too_large(_e):
+    # Flask's default 413 is an HTML page, which the fetch() caller parses as
+    # JSON and reports as a syntax error instead of as "file too big".
+    return jsonify({"error": f"File is larger than "
+                             f"{IBD_UPLOAD_MAX_BYTES // 1024} KB."}), 413
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +170,11 @@ def _cfg_from_request(body: dict) -> RunConfig:
         # "" means rank the groups; a name means scan that one. Not validated
         # against a list -- Finviz owns that vocabulary. See src/config.py.
         cfg.us_group = str(market.get("group", "") or "").strip()
+        # Which IBD screen export to read. Not validated against the directory
+        # here for the same reason the group is not validated against Finviz:
+        # src/config.py owns that rule and src/market_us.py reports what it
+        # actually found on disk.
+        cfg.us_ibd_list = str(market.get("ibd_list", "") or "").strip()
         # us_rotation_quadrants is deliberately NOT taken from the request.
         # It is configuration; it stays whatever config/default.yaml says.
     else:
@@ -241,6 +265,127 @@ def groups():
 
     _GROUP_CACHE[kind] = (time.time(), names)
     return jsonify({"groups": names})
+
+
+# The IBD picker is populated from the FILESYSTEM, not from a list here, for
+# the same reason the Finviz picker is populated from Finviz: the set of lists
+# is whatever you have downloaded into data/ibd/, and a hardcoded copy would go
+# stale the first time you export a new screen. Not cached -- it is a directory
+# listing of a handful of files, and a stale picker after a fresh download is
+# exactly the confusion this endpoint exists to avoid.
+@app.get("/api/ibd-lists")
+def ibd_lists():
+    from src.ibd_import import available_ibd_lists
+    try:
+        lists = available_ibd_lists()
+    except OSError as e:
+        log.exception("Could not read the IBD export directory")
+        return jsonify({"error": f"Could not read data/ibd: {e}"}), 500
+    # {name: [ISO dates, newest first]} -- the UI shows the newest as the
+    # as-of date so a forgotten download is visible before you run, not after.
+    return jsonify({"lists": lists})
+
+
+# List names become filename stems, so the slug is restricted rather than
+# sanitised: an allow-list of [a-z0-9_] cannot express a path separator, a
+# parent reference or a leading dot, and the target is re-checked against the
+# directory afterwards anyway.
+_IBD_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _ibd_slug(raw: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(raw or "").strip().lower()).strip("_")
+
+
+@app.post("/api/ibd-upload")
+def ibd_upload():
+    """Accept an IBD screen export and file it as a dated snapshot.
+
+    PARSED BEFORE IT IS PERSISTED. The upload goes to a temp file, through
+    src/ibd_import.py, and only reaches data/ibd/ if it yielded tickers. The
+    alternative -- write first, discover on the next run -- puts a file in the
+    picker that produces an empty scan, which is indistinguishable from a
+    market where nothing set up.
+
+    The as-of date comes from the client because the export does not carry one.
+    It defaults to today, which is right when you download and upload in the
+    same session and wrong otherwise, so it is an editable field rather than a
+    server-side assumption.
+    """
+    from src.ibd_import import IBD_DATA_DIR, SUPPORTED_SUFFIXES, read_ibd_export
+
+    upload = request.files.get("file")
+    if upload is None or not (upload.filename or "").strip():
+        return jsonify({"error": "No file was uploaded."}), 400
+
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        return jsonify({"error": f"Unsupported file type {suffix or '(none)'}. "
+                                 f"Expected one of {list(SUPPORTED_SUFFIXES)}."}), 400
+
+    slug = _ibd_slug(request.form.get("list_name") or Path(upload.filename).stem)
+    if not _IBD_SLUG_RE.match(slug):
+        return jsonify({"error": "The list name must start with a letter and "
+                                 "contain only letters, digits and "
+                                 "underscores."}), 400
+
+    raw_date = (request.form.get("as_of") or "").strip()
+    if raw_date:
+        try:
+            as_of = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": f"as_of must be YYYY-MM-DD, got "
+                                     f"{raw_date!r}."}), 400
+    else:
+        as_of = date.today()
+    if as_of > date.today():
+        # A future date wins every point-in-time comparison in
+        # load_ibd_list(), so a typo here would shadow every real snapshot.
+        return jsonify({"error": f"as_of {as_of} is in the future."}), 400
+
+    target_dir = Path(IBD_DATA_DIR).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = (target_dir / f"{slug}_{as_of.isoformat()}{suffix}").resolve()
+    if target.parent != target_dir:
+        return jsonify({"error": "Refusing to write outside data/ibd."}), 400
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            upload.save(tmp)
+            tmp_path = Path(tmp.name)
+
+        try:
+            snapshot = read_ibd_export(tmp_path, list_name=slug, as_of=as_of)
+        except (ValueError, FileNotFoundError) as e:
+            return jsonify({"error": f"That file did not parse as an IBD "
+                                     f"export: {e}"}), 400
+
+        # One snapshot per list per date, whatever the extension. Without this
+        # an .xlsx and a .csv for the same day both match in load_ibd_list()
+        # and the tie is broken arbitrarily.
+        replaced = []
+        for other in SUPPORTED_SUFFIXES:
+            existing = target_dir / f"{slug}_{as_of.isoformat()}{other}"
+            if existing.exists():
+                replaced.append(existing.name)
+                existing.unlink()
+
+        shutil.move(str(tmp_path), target)
+        tmp_path = None
+        log.info("IBD upload: %s -> %s (%d tickers)%s", upload.filename,
+                 target.name, len(snapshot),
+                 f", replacing {replaced}" if replaced else "")
+    except OSError as e:
+        log.exception("IBD upload failed")
+        return jsonify({"error": f"Could not save the file: {e}"}), 500
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+    return jsonify({"list_name": slug, "as_of": as_of.isoformat(),
+                    "filename": target.name, "count": len(snapshot),
+                    "replaced": replaced})
 
 
 @app.post("/api/run")

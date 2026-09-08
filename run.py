@@ -13,12 +13,15 @@ Usage:
 
 TARGET SOURCES
 ==============
-US            industries | sectors | rotation | index | quality | ticker
+US            industries | sectors | rotation | index | quality | ibd | ticker
 International indices | quality
 
   * sectors / industries take cfg.us_group to scan ONE named Finviz group;
     empty means the top-N by cfg.us_perf_col.
   * index takes cfg.us_indices, a list unioned by src/indices.py.
+  * ibd takes cfg.us_ibd_list, one IBD Digital screen export read off disk.
+    Unlike every other source it does not refresh itself; the as-of date of
+    the file is logged on every run for that reason.
 
 Every source returns (tickers, meta_df), fed through _enrich(), so a new
 universe is a new collector and nothing else. The one exception is the
@@ -63,7 +66,8 @@ import pandas as pd
 from src.config import RunConfig, load_config
 from src.data_loader import DataLoader
 from src.indicators import add_display_indicators
-from src.instrument import Instrument, METADATA_COLUMNS, results_columns
+from src.instrument import (Instrument, METADATA_COLUMNS, SOURCE_COLUMNS,
+                            results_columns)
 from src.plotter import plot_generic
 from src.registry import load_strategies, get_registry
 from src.screener import Screener
@@ -80,7 +84,10 @@ CHART_YEARS = 3
 # Metadata attached after the scan. Market is included because the holdings and
 # index sources know the listing country per row, which is finer than the
 # single label the Screener stamps on the whole run.
-ENRICH_COLUMNS = (*METADATA_COLUMNS, "Market")
+# SOURCE_COLUMNS is included so a vendor rating a source supplies (IBD
+# Composite) survives the scan. `if col in idx.columns` below means a source
+# that does not produce one pays nothing for being listed.
+ENRICH_COLUMNS = (*METADATA_COLUMNS, "Market", *SOURCE_COLUMNS)
 
 # Benchmark proxy per index key, used when us_source == "index" so RS is
 # measured against the index actually being scanned. Total-return ETFs, not
@@ -158,9 +165,17 @@ def _enrich(res: pd.DataFrame, meta_df: pd.DataFrame | None) -> pd.DataFrame:
     for col in ENRICH_COLUMNS:
         if col in idx.columns:
             mapped = res["Ticker"].map(idx[col])
-            # Keep what the Screener already stamped where the map has no
-            # answer -- that matters for Market, which is never blank.
-            res[col] = mapped.fillna(res[col]) if col in res.columns else mapped.fillna("")
+            if col in res.columns:
+                # Keep what the Screener already stamped where the map has no
+                # answer -- that matters for Market, which is never blank.
+                res[col] = mapped.fillna(res[col])
+            elif pd.api.types.is_numeric_dtype(mapped):
+                # Numeric metadata (IBD Composite) keeps NaN for a miss. Filling
+                # it with "" would turn the column to object dtype, which sorts
+                # lexicographically and rounds to nothing downstream.
+                res[col] = mapped
+            else:
+                res[col] = mapped.fillna("")
     return res
 
 
@@ -242,6 +257,12 @@ def _scan(cfg: RunConfig, screener: Screener, strategy,
             elif source == "quality":
                 from src.holdings import collect_quality
                 tickers, meta_df = collect_quality("us_quality")
+            elif source == "ibd":
+                # Imported inside the branch, not in the tuple above: a name
+                # missing from that tuple takes down every US source with an
+                # ImportError, which is how `sp500` broke the whole US path.
+                from src.market_us import collect_us_ibd
+                tickers, meta_df = collect_us_ibd(cfg.us_ibd_list)
             else:
                 tickers, meta_df = collect_us_candidates(
                     cfg.us_top_n_industries, cfg.us_perf_col)

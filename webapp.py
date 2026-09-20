@@ -47,6 +47,7 @@ import logging
 import re
 import shutil
 import tempfile
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -67,6 +68,17 @@ CONFIG_PATH = "config/default.yaml"
 OUTPUT_DIR = "results"
 INDUSTRY_LEADERS_PROGRESS_PATH = Path(OUTPUT_DIR) / "industry_leaders_progress.json"
 app = Flask(__name__, static_folder="web", static_url_path="")
+
+# In-memory progress for the screener run (single-user app, no concurrency concern).
+_RUN_LOCK = threading.Lock()
+RUN_PROGRESS: dict = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "matched": 0,
+    "started_at": None,   # time.monotonic() of first progress callback
+    "eta_seconds": None,
+}
 
 # An IBD screen export is a few KB. The cap is here so a mis-picked file fails
 # at the socket instead of being buffered into memory, and it is generous
@@ -395,9 +407,6 @@ def run_endpoint():
     if not strategy_key or strategy_key not in get_registry():
         return jsonify({"error": f"Unknown strategy {strategy_key!r}"}), 400
 
-    # mode / us_source / indices / quadrants are all validated by
-    # src/config.py. Not re-checked here: a second copy of those rules is a
-    # second source of truth, and the browser copy is the one that goes stale.
     try:
         cfg = _cfg_from_request(body)
     except (ValueError, KeyError) as e:
@@ -409,14 +418,59 @@ def run_endpoint():
     if cfg.us_source == "ticker" and not cfg.us_tickers:
         return jsonify({"error": "Ticker mode selected but no tickers given."}), 400
 
+    # Wire a progress callback into the Screener so the frontend can poll it.
+    def _on_progress(done: int, total: int, matched: int) -> None:
+        with _RUN_LOCK:
+            now = time.monotonic()
+            started = RUN_PROGRESS["started_at"]
+            if started is None:
+                RUN_PROGRESS["started_at"] = now
+                started = now
+            elapsed = now - started
+            eta = None
+            if done > 0 and total > 0 and elapsed > 0:
+                rate = done / elapsed          # tickers/sec
+                remaining = (total - done) / rate
+                eta = round(remaining)
+            RUN_PROGRESS.update({
+                "running": True,
+                "done": done,
+                "total": total,
+                "matched": matched,
+                "eta_seconds": eta,
+            })
+
+    with _RUN_LOCK:
+        RUN_PROGRESS.update({
+            "running": True,
+            "done": 0,
+            "total": 0,
+            "matched": 0,
+            "started_at": None,
+            "eta_seconds": None,
+        })
+
+    from src.screener import Screener as _Screener  # local to avoid circular import
+    # Monkey-patch the progress_cb onto a fresh Screener inside run() by
+    # temporarily wrapping the Screener constructor.
+    _orig_screener_init = _Screener.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _orig_screener_init(self, *args, **kwargs)
+        self.progress_cb = _on_progress
+
+    _Screener.__init__ = _patched_init
     try:
         df = run(cfg)
     except Exception as e:  # noqa: BLE001 — surface errors to the UI cleanly
         log.exception("Run failed")
         return jsonify({"error": str(e)}), 500
+    finally:
+        _Screener.__init__ = _orig_screener_init
+        with _RUN_LOCK:
+            RUN_PROGRESS["running"] = False
 
-    # In ticker (diagnostic) mode, return the charts even if nothing matched —
-    # the chart shows the detected base so you can see WHY it didn't match.
+    # In ticker (diagnostic) mode, return the charts even if nothing matched.
     def _ticker_charts():
         out_dir = Path(cfg.output_dir)
         ch = {}
@@ -433,7 +487,6 @@ def run_endpoint():
                             "note": "No setup matched, but here are the detected bases."})
         return jsonify({"columns": [], "rows": [], "count": 0})
 
-    # Same column order as the CLI table and the CSV — one function decides it.
     meta = get_registry()[cfg.strategy_key].meta
     cols = results_columns(meta.display_columns, df.columns)
     rows = df[cols].round(4).astype(object).where(df[cols].notna(), None).values.tolist()
@@ -449,6 +502,245 @@ def run_endpoint():
         charts.update(_ticker_charts())
 
     return jsonify({"columns": cols, "rows": rows, "count": len(df), "charts": charts})
+
+
+@app.get("/api/run-progress")
+def run_progress_endpoint():
+    """Poll-able progress for the active screener run."""
+    with _RUN_LOCK:
+        snap = dict(RUN_PROGRESS)
+    snap.pop("started_at", None)
+    return jsonify(snap)
+
+
+@app.get("/api/market-sentiment")
+def market_sentiment_endpoint():
+    """
+    Fetch Fear & Greed index from CNN and AAII sentiment survey.
+    Returns raw values plus a regime label for Fear & Greed.
+    """
+    import requests
+    import json as _json
+
+    result: dict = {"fear_greed": None, "aaii": None, "errors": []}
+
+    # Common browser-like headers to reduce bot-blocking from Cloudflare / CDN
+    browser_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/116.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "Referer": "https://www.cnn.com/",
+    }
+
+    # --- Fear & Greed (CNN) ---
+    try:
+        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        try:
+            r = requests.get(url, headers=browser_headers, timeout=8)
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"network error: {e}")
+
+        if r.status_code != 200:
+            # Provide a clearer error message for blocked requests (418, 403, etc.)
+            raise Exception(f"HTTP {r.status_code}: {r.reason}")
+
+        # Some CDNs return an HTML page instead of JSON when blocking; detect that
+        text = r.text.strip()
+        if text.startswith("<"):
+            raise Exception("Blocked or returned HTML instead of JSON")
+
+        data = r.json()
+        score = round(data["fear_and_greed"]["score"], 1)
+        rating = data["fear_and_greed"].get("rating")
+        # Map to our own regime labels
+        if score > 90:
+            regime = "extreme_greed"
+        elif score > 75:
+            regime = "greed"
+        elif score > 25:
+            regime = "neutral"
+        elif score > 10:
+            regime = "fear"
+        elif score > 5:
+            regime = "panic"
+        else:
+            regime = "extreme_panic"
+        result["fear_greed"] = {"score": score, "cnn_rating": rating, "regime": regime}
+    except Exception as e:  # noqa: BLE001
+        # Keep error details for the client to show and retry guidance
+        result["errors"].append(f"Fear&Greed: {e}")
+
+    # --- AAII Sentiment Survey ---
+    # Fetch from Nasdaq Data Link (formerly Quandl) dataset code AAII/AAII_SENTIMENT
+    aaii_fetched = False
+    nasdaq_urls = [
+        "https://data.nasdaq.com/api/v3/datasets/AAII/AAII_SENTIMENT.json?rows=1",
+        "https://www.quandl.com/api/v3/datasets/AAII/AAII_SENTIMENT.json?rows=1",
+        "https://data.nasdaq.com/api/v3/datasets/AAII/AAII_SENTIMENT.csv?rows=1",
+        "https://www.quandl.com/api/v3/datasets/AAII/AAII_SENTIMENT.csv?rows=1",
+    ]
+
+    aaii_req_headers = browser_headers.copy()
+    aaii_req_headers.update({"Accept": "application/json, text/csv, */*"})
+
+    for url in nasdaq_urls:
+        try:
+            r = requests.get(url, headers=aaii_req_headers, timeout=8)
+            if r.status_code == 200:
+                if ".json" in url:
+                    data_obj = r.json()
+                    dataset = data_obj.get("dataset") or data_obj.get("dataset_data")
+                    if dataset and "column_names" in dataset and "data" in dataset:
+                        cols = [str(c).lower().strip() for c in dataset["column_names"]]
+                        rows = dataset["data"]
+                        if rows and len(rows) > 0:
+                            latest = rows[0]
+                            def _val_json(col_kw):
+                                for idx, col in enumerate(cols):
+                                    if col_kw in col:
+                                        v = latest[idx]
+                                        if v is not None:
+                                            try:
+                                                v = float(v)
+                                                return round(v * 100 if v < 1 else v, 1)
+                                            except (ValueError, TypeError):
+                                                pass
+                                return None
+                            bull = _val_json("bullish")
+                            bear = _val_json("bearish")
+                            neut = _val_json("neutral")
+                            dt_idx = cols.index("date") if "date" in cols else 0
+                            dt_val = str(latest[dt_idx]).strip() if latest and len(latest) > dt_idx else None
+                            if bull is not None and bear is not None:
+                                result["aaii"] = {
+                                    "bullish": bull,
+                                    "neutral": neut,
+                                    "bearish": bear,
+                                    "bull_avg": 38.0,
+                                    "bear_avg": 31.5,
+                                    "date": dt_val,
+                                }
+                                aaii_fetched = True
+                                break
+                elif ".csv" in url:
+                    import csv, io
+                    reader = list(csv.reader(io.StringIO(r.text)))
+                    if len(reader) >= 2:
+                        cols = [str(c).lower().strip() for c in reader[0]]
+                        latest = reader[1]
+                        def _val_csv(col_kw):
+                            for idx, col in enumerate(cols):
+                                if col_kw in col:
+                                    v = latest[idx]
+                                    if v is not None:
+                                        try:
+                                            v = float(v)
+                                            return round(v * 100 if v < 1 else v, 1)
+                                        except (ValueError, TypeError):
+                                            pass
+                            return None
+                        bull = _val_csv("bullish")
+                        bear = _val_csv("bearish")
+                        neut = _val_csv("neutral")
+                        dt_idx = cols.index("date") if "date" in cols else 0
+                        dt_val = str(latest[dt_idx]).strip() if latest and len(latest) > dt_idx else None
+                        if bull is not None and bear is not None:
+                            result["aaii"] = {
+                                "bullish": bull,
+                                "neutral": neut,
+                                "bearish": bear,
+                                "bull_avg": 38.0,
+                                "bear_avg": 31.5,
+                                "date": dt_val,
+                            }
+                            aaii_fetched = True
+                            break
+        except Exception:  # noqa: BLE001
+            continue
+
+    if not aaii_fetched:
+        # Fallback to legacy AAII CSV/XLS URLs if Nasdaq Data Link is unavailable
+        try:
+            csv_url = "https://www.aaii.com/files/surveys/sentiment.csv"
+            xls_url = "https://www.aaii.com/files/surveys/sentiment.xls"
+            aaii_site_headers = browser_headers.copy()
+            aaii_site_headers.update({"Referer": "https://www.aaii.com/", "Accept": "text/csv, */*; q=0.1"})
+
+            raw = None
+            used_url = None
+            for url in (csv_url, xls_url):
+                try:
+                    r = requests.get(url, headers=aaii_site_headers, timeout=8)
+                except requests.exceptions.RequestException:
+                    continue
+                if r.status_code == 200:
+                    raw = r.content
+                    used_url = url
+                    break
+
+            if raw is not None and used_url:
+                if used_url.lower().endswith('.csv'):
+                    import csv, io
+                    try:
+                        rows = list(csv.reader(io.StringIO(raw.decode('utf-8'))))
+                    except UnicodeDecodeError:
+                        rows = list(csv.reader(io.StringIO(raw.decode('latin-1'))))
+                else:
+                    import io
+                    try:
+                        import openpyxl
+                        wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+                        ws = wb.active
+                        rows = list(ws.iter_rows(values_only=True))
+                    except Exception:
+                        import xlrd  # type: ignore
+                        wb = xlrd.open_workbook(file_contents=raw)
+                        ws = wb.sheet_by_index(0)
+                        rows = [ws.row_values(i) for i in range(ws.nrows)]
+
+                header_idx = None
+                for i, row in enumerate(rows):
+                    if any("bullish" in str(c).lower() for c in row):
+                        header_idx = i
+                        break
+                if header_idx is not None:
+                    headers = [str(c).lower().strip() for c in rows[header_idx]]
+                    data_row = None
+                    for row in reversed(rows[header_idx + 1:]):
+                        if row and row[0] and str(row[0]).strip():
+                            data_row = row
+                            break
+                    if data_row:
+                        bull_idx = next((i for i, h in enumerate(headers) if "bull" in h), None)
+                        bear_idx = next((i for i, h in enumerate(headers) if "bear" in h), None)
+                        neutral_idx = next((i for i, h in enumerate(headers) if "neutral" in h), None)
+                        def _pct(v):
+                            try:
+                                v = float(v)
+                                return round(v * 100 if v < 1 else v, 1)
+                            except (TypeError, ValueError):
+                                return None
+                        result["aaii"] = {
+                            "bullish": _pct(data_row[bull_idx]) if bull_idx is not None else None,
+                            "neutral": _pct(data_row[neutral_idx]) if neutral_idx is not None else None,
+                            "bearish": _pct(data_row[bear_idx]) if bear_idx is not None else None,
+                            "bull_avg": 38.0,
+                            "bear_avg": 31.5,
+                            "date": str(data_row[0]).strip() if data_row else None,
+                        }
+                        aaii_fetched = True
+        except Exception:  # noqa: BLE001
+            pass
+
+    if not aaii_fetched and result["aaii"] is None:
+        result["errors"].append("AAII: No se pudo obtener la encuesta de sentimiento (Nasdaq Data Link AAII/AAII_SENTIMENT ni AAII.com)")
+
+    return jsonify(result)
 
 
 @app.get("/charts/<path:filename>")
@@ -793,17 +1085,21 @@ def market_chart_page(symbol):
 @app.get("/api/market-state")
 def market_state_endpoint():
     """
-    Semáforo de estado para los índices americanos principales
-    (src/benchmarks.py::US_MARKET_INDICES), calculados en dos horizontes:
-    largo plazo (MA30) y medio plazo (MA10).
+    Semáforo de estado para los índices.
     """
+    from flask import request
     from src.data_loader import DataLoader
-    from src.benchmarks import us_market_states
+    from src.benchmarks import us_market_states, intl_market_states
 
+    region = request.args.get("region", "us")
     loader = DataLoader()
     try:
-        long_term = us_market_states(loader, timeframe="long")
-        medium_term = us_market_states(loader, timeframe="medium")
+        if region == "international":
+            long_term = intl_market_states(loader, timeframe="long")
+            medium_term = intl_market_states(loader, timeframe="medium")
+        else:
+            long_term = us_market_states(loader, timeframe="long")
+            medium_term = us_market_states(loader, timeframe="medium")
     except Exception as e:  # noqa: BLE001
         log.exception("Market state failed")
         return jsonify({"error": str(e)}), 500

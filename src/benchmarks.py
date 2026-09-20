@@ -18,6 +18,17 @@ US_MARKET_INDICES: dict[str, tuple[str, str]] = {
     "russell2000": ("Russell 2000",         "IWM"),
 }
 
+INTL_MARKET_INDICES: dict[str, tuple[str, str]] = {
+    # code -> (display name, Yahoo symbol)
+    "spain":       ("Ibex 35",         "^IBEX"),
+    "portugal":    ("PSI 20",          "PSI20.LS"),
+    "uk":          ("Inglaterra",      "^FTSE"),
+    "germany":     ("DAX",             "^GDAXI"),
+    "france":      ("Francia",         "^FCHI"),
+    "switzerland": ("Suiza",           "^SSMI"),
+    "italy":       ("Italia",          "FTSEMIB.MI"),
+}
+
 BENCHMARKS: dict[str, str] = {
     "US": "SPY",
 }
@@ -122,6 +133,23 @@ def us_market_states_all(loader: DataLoader) -> dict[str, list[dict]]:
     return {
         "long_term": us_market_states(loader, timeframe="long"),
         "medium_term": us_market_states(loader, timeframe="medium"),
+    }
+
+
+def intl_market_states(loader: DataLoader, timeframe: str = "long") -> list[dict]:
+    """market_state_for_symbol() for every index in INTL_MARKET_INDICES."""
+    out = []
+    for code, (name, symbol) in INTL_MARKET_INDICES.items():
+        state = market_state_for_symbol(loader, symbol, timeframe=timeframe)
+        out.append({"code": code, "name": name, **state})
+    return out
+
+
+def intl_market_states_all(loader: DataLoader) -> dict[str, list[dict]]:
+    """Convenience helper returning both long-term and medium-term states for international markets."""
+    return {
+        "long_term": intl_market_states(loader, timeframe="long"),
+        "medium_term": intl_market_states(loader, timeframe="medium"),
     }
 
 

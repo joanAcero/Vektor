@@ -467,6 +467,28 @@
     white-space: nowrap;
   }
   .market-state .ms-detail { color: var(--muted); flex-basis: 100%; }
+
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  
+  .loading-text {
+    animation: pulse 1.5s infinite;
+    display: inline-block;
+    vertical-align: middle;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
 </style>
 </head>
 <body>
@@ -478,57 +500,57 @@
 
   <div class="tabs">
     <button type="button" class="tab" id="tab-screen" aria-pressed="true">Screener</button>
-    <button type="button" class="tab" id="tab-rotation" aria-pressed="false">Contexto de mercado</button>
+    <button type="button" class="tab" id="tab-market-state" aria-pressed="false">Estado del mercado</button>
+    <button type="button" class="tab" id="tab-sector-rotation" aria-pressed="false">Rotación sectorial</button>
   </div>
 
-  <!-- ================= MARKET CONTEXT =================
-       ids kept as -rotation on purpose: renaming them means touching every
-       JS handler that toggles this view or loads its data, which is a
-       separate change from the label/copy update requested here. -->
-  <div id="view-rotation" class="hidden">
-
-    <div class="panel intro-panel">
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
-        <div style="flex:1; min-width:280px;">
-          <div class="legend">Contexto de mercado</div>
-          <p class="intro-lede" style="margin-bottom:0;">
-            Antes de buscar una acción concreta, el contexto tiene que acompañar:
-            <b>el mercado, el sector y la industria</b> explican gran parte de su
-            movimiento antes de que el gráfico individual entre en juego.
-          </p>
-        </div>
-        <div>
-          <button type="button" id="reload-market-context" class="run" style="width:auto; padding:7px 16px; font-size:13px; display:inline-flex; align-items:center; gap:6px;">
-            <span id="reload-icon">🔄</span> <span id="reload-text">Recargar datos</span>
-          </button>
-        </div>
+  <div id="view-market-state" class="hidden">
+    <!-- ===== Sentiment panel ===== -->
+    <div class="panel">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:16px;">
+        <div class="legend" style="margin-bottom:0;">Sentimiento del mercado</div>
+        <button type="button" id="reload-sentiment" class="run" style="width:auto; padding:4px 12px; font-size:12px; display:inline-flex; align-items:center; gap:6px;">
+          <span>🔄</span> <span id="reload-sentiment-text">Recargar</span>
+        </button>
       </div>
-      <div class="intro-flow" style="margin-top:16px;">
-        <span class="step"><b>1. Mercado</b> — ¿el conjunto acompaña?</span>
-        <span class="arrow">→</span>
-        <span class="step"><b>2. Sectores</b> — ¿dónde está entrando el dinero?</span>
-        <span class="arrow">→</span>
-        <span class="step"><b>3. Industrias</b> — ¿qué grupo lidera dentro del sector?</span>
+
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:16px;">
+        <div id="fear-greed-wrap">
+          <div class="market-state loading"><span class="spinner"></span><span class="loading-text">Cargando Fear &amp; Greed…</span></div>
+        </div>
+        <div id="aaii-wrap">
+          <div class="market-state loading"><span class="spinner"></span><span class="loading-text">Cargando AAII…</span></div>
+        </div>
       </div>
     </div>
 
+    <!-- ===== General Market State panel ===== -->
     <div class="panel">
-      <div class="legend">Estado del mercado general</div>
-      <div class="desc">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:16px;">
+        <div class="legend" style="margin-bottom:0;">Estado del mercado general</div>
+        <button type="button" id="reload-market-state" class="run" style="width:auto; padding:4px 12px; font-size:12px; display:inline-flex; align-items:center; gap:6px;">
+          <span id="reload-market-icon">🔄</span> <span id="reload-market-text">Recargar</span>
+        </button>
+      </div>
+      
+      <div class="field" style="margin-bottom: 16px;">
+        <div class="seg" role="group" aria-label="Target region">
+          <button type="button" id="ctx-region-us" aria-pressed="true">US</button>
+          <button type="button" id="ctx-region-intl" aria-pressed="false">International</button>
+        </div>
+      </div>
+
+      <div class="desc" id="ctx-desc-unified">
         <p>
-          Antes de mirar sectores, el mercado en su conjunto tiene que respaldar la operación.
           Evaluamos la salud y dirección del mercado en dos horizontes temporales complementarios:
           <b>largo plazo</b> (tendencia primaria con la MA30 semanal) y <b>medio plazo</b> (tendencia intermedia con la MA10 semanal).
-          El análisis incluye en primer lugar el <b>S&amp;P 500 Equal Weight (RSP)</b> para evaluar la participación real
-          del mercado sin la distorsión del peso por capitalización, seguido de <b>S&amp;P 500 (SPY)</b>, <b>Nasdaq 100 (QQQ)</b>,
-          <b>Dow Jones (DIA)</b> y <b>Russell 2000 (IWM)</b>:
-          <ul>
-            <li><b>Alcista</b> — Cierre por encima de la media móvil semanal con la media en pendiente ascendente (&gt; +0.5%).</li>
-            <li><b>Bajista</b> — Cierre por debajo de la media móvil semanal con la media en pendiente descendente (&lt; -0.5%).</li>
-            <li><b>Corrección</b> — Consolidación o descanso dentro de una tendencia alcista previa.</li>
-            <li><b>Formando base</b> — Consolidación o estabilización tras una tendencia bajista previa.</li>
-          </ul>
         </p>
+        <ul style="margin-bottom:0;">
+          <li><b>Alcista</b> — Cierre por encima de la media móvil semanal con la media en pendiente ascendente (&gt; +0.5%).</li>
+          <li><b>Bajista</b> — Cierre por debajo de la media móvil semanal con la media en pendiente descendente (&lt; -0.5%).</li>
+          <li><b>Corrección</b> — Consolidación o descanso dentro de una tendencia alcista previa.</li>
+          <li><b>Formando base</b> — Consolidación o estabilización tras una tendencia bajista previa.</li>
+        </ul>
       </div>
 
       <div style="margin-top:18px;">
@@ -544,17 +566,23 @@
       <div style="margin-top:22px;">
         <div style="font-weight:600; font-size:14px; margin-bottom:8px; display:flex; align-items:baseline; gap:8px;">
           <span>Medio plazo (MA10 semanal)</span>
-          <span style="font-size:12px; font-weight:normal; color:var(--muted);">— Tendencia intermedia (aviso de Weinstein)</span>
+          <span style="font-size:12px; font-weight:normal; color:var(--muted);">— Tendencia intermedia</span>
         </div>
         <div id="market-state-med-wrap" class="market-state-grid">
           <div class="market-state loading">Calculando el estado de medio plazo…</div>
         </div>
       </div>
-
     </div>
+  </div>
 
-    <div class="panel">
-      <div class="legend">Sectores líderes (Weinstein)</div>
+  <div id="view-sector-rotation" class="hidden">
+    <div class="panel" id="ctx-sectors-panel">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:16px;">
+        <div class="legend" style="margin-bottom:0;">Sectores líderes (Weinstein)</div>
+        <button type="button" id="reload-sector-rotation" class="run" style="width:auto; padding:4px 12px; font-size:12px; display:inline-flex; align-items:center; gap:6px;">
+          <span id="reload-sector-icon">🔄</span> <span id="reload-sector-text">Recargar</span>
+        </button>
+      </div>
       <div class="desc">
         <p>
           Weinstein: Comprar solo en sectores que estén en <b>Etapa 2</b> y con <b>fuerza relativa (RS) positiva</b> frente al mercado.
@@ -594,7 +622,7 @@
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel" id="ctx-industries-panel">
       <div class="legend"> Industrias líderes (O'Neil)</div>
       <div class="desc">
         <p>
@@ -797,11 +825,6 @@
         </div>
         <div class="vimg" id="vimg"></div>
       </div>
-
-      <div class="foot">
-        Every chart shows the last two years of weekly bars. The full results table
-        is written to <code>results/&lt;strategy&gt;_setups.csv</code> on each run.
-      </div>
     </div>
   </div>
 </div>
@@ -871,6 +894,15 @@ function renderMarketCards(markets) {
   }).join("");
 }
 
+let ctxRegion = "us";
+
+function setCtxRegion(r) {
+  ctxRegion = r;
+  $("ctx-region-us").setAttribute("aria-pressed", r === "us");
+  $("ctx-region-intl").setAttribute("aria-pressed", r === "international");
+  loadMarketState();
+}
+
 async function loadMarketState() {
   const longWrap = $("market-state-long-wrap");
   const medWrap = $("market-state-med-wrap");
@@ -878,7 +910,7 @@ async function loadMarketState() {
   if (longWrap) longWrap.innerHTML = '<div class="market-state loading">Calculando el estado de largo plazo…</div>';
   if (medWrap) medWrap.innerHTML = '<div class="market-state loading">Calculando el estado de medio plazo…</div>';
   try {
-    const res = await fetch("/api/market-state");
+    const res = await fetch(`/api/market-state?region=${ctxRegion}`);
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || "market-state failed");
     if (longWrap) longWrap.innerHTML = renderMarketCards(data.long_term || data.markets || []);
@@ -887,6 +919,94 @@ async function loadMarketState() {
     const errHtml = `<div class="market-state state-unknown">No se pudo calcular el estado: ${esc(e.message)} <button type="button" class="btn-retry" onclick="loadMarketState()">Reintentar</button></div>`;
     if (longWrap) longWrap.innerHTML = errHtml;
     if (medWrap) medWrap.innerHTML = errHtml;
+  }
+}
+
+// ---------- Market Sentiment ----------
+const FG_META = {
+  extreme_greed: { emoji: "🟢", label: "Codicia extrema", cls: "state-bull",     note: "mercado sobrecalentado, evitar nuevas entradas" },
+  greed:         { emoji: "🟡", label: "Codicia",          cls: "state-amber",    note: "momentum fuerte, gestionar riesgo con cuidado" },
+  neutral:       { emoji: "⚪", label: "Neutral",           cls: "state-unknown",  note: "condiciones normales" },
+  fear:          { emoji: "🟠", label: "Miedo",             cls: "state-amber",    note: "debilidad de corto plazo, vigilar" },
+  panic:         { emoji: "🔴", label: "Pánico",            cls: "state-bear",     note: "venta indiscriminada, no añadir riesgo" },
+  extreme_panic: { emoji: "🟣", label: "Pánico extremo",   cls: "state-bear",     note: "rebote inminente probable; zona de oportunidad para compradores contrarians" },
+};
+
+async function loadSentiment() {
+  const fgWrap = $("fear-greed-wrap");
+  const aaiiWrap = $("aaii-wrap");
+  if (fgWrap) fgWrap.innerHTML = '<div class="market-state loading"><span class="spinner"></span><span class="loading-text">Cargando Fear &amp; Greed…</span></div>';
+  if (aaiiWrap) aaiiWrap.innerHTML = '<div class="market-state loading"><span class="spinner"></span><span class="loading-text">Cargando AAII…</span></div>';
+  try {
+    const res = await fetch("/api/market-sentiment");
+    const data = await res.json();
+
+    // Fear & Greed
+    if (fgWrap) {
+      if (data.fear_greed) {
+        const fg = data.fear_greed;
+        const meta = FG_META[fg.regime] || { emoji: "⚪", label: fg.regime, cls: "state-unknown", note: "" };
+        const fgLink = "https://edition.cnn.com/markets/fear-and-greed";
+        const fgInfo = meta.note ? `${fg.score}, ${meta.note}` : `${fg.score}`;
+        fgWrap.innerHTML = `<a href="${fgLink}" target="_blank" rel="noopener" style="text-decoration:none; color:inherit; display:block; height:100%;">
+          <div class="market-state ${meta.cls}" style="height:100%; flex-direction:column; align-items:flex-start; gap:6px; padding:14px 16px; box-sizing:border-box;">
+            <div style="font-weight:600; font-size:14px; width:100%; display:flex; justify-content:space-between; align-items:center;">
+              <span>Fear &amp; Greed Index (CNN)</span>
+              <span style="font-size:12px; color:var(--muted);">↗</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:4px;">
+              <span class="ms-badge">${meta.emoji} ${meta.label}</span>
+              <span style="font-size:14px; font-weight:600;">${fgInfo}</span>
+            </div>
+          </div></a>`;
+      } else {
+        fgWrap.innerHTML = `<div class="market-state state-unknown">No disponible${data.errors.length ? " — " + esc(data.errors[data.errors.length - 1]) : ""}. <button class="btn-retry" onclick="loadSentiment()">Reintentar</button></div>`;
+      }
+    }
+
+    // AAII
+    if (aaiiWrap) {
+      const aaiiLink = "https://www.aaii.com/sentimentsurvey";
+      if (data.aaii) {
+        const a = data.aaii;
+        const fmt = v => v != null ? v.toFixed(1) + "%" : "—";
+        const col = (v, avg) => {
+          if (v == null) return "var(--muted)";
+          return v > avg ? "var(--q-leading)" : v < avg ? "var(--q-lagging)" : "inherit";
+        };
+        aaiiWrap.innerHTML = `<a href="${aaiiLink}" target="_blank" rel="noopener" style="text-decoration:none; color:inherit; display:block; height:100%;">
+          <div class="market-state state-unknown" style="height:100%; flex-direction:column; align-items:flex-start; gap:6px; padding:14px 16px; box-sizing:border-box;">
+            <div style="font-weight:600; font-size:14px; width:100%; display:flex; justify-content:space-between; align-items:center;">
+              <span>AAII Sentiment Survey (semanal)</span>
+              <span style="font-size:12px; color:var(--muted);">↗</span>
+            </div>
+            <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:center; margin-top:4px;">
+              <div>
+                <span style="font-size:12px; color:var(--muted); font-weight:600;">Alcistas: </span>
+                <span style="font-size:15px; font-weight:700; color:${col(a.bullish, a.bull_avg)};">${fmt(a.bullish)}</span>
+                <span style="font-size:12px; color:var(--muted); font-family:ui-monospace, monospace;"> (media ${a.bull_avg}%)</span>
+              </div>
+              <div>
+                <span style="font-size:12px; color:var(--muted); font-weight:600;">Bajistas: </span>
+                <span style="font-size:15px; font-weight:700; color:${col(a.bearish, a.bear_avg)};">${fmt(a.bearish)}</span>
+                <span style="font-size:12px; color:var(--muted); font-family:ui-monospace, monospace;"> (media ${a.bear_avg}%)</span>
+              </div>
+            </div>
+            ${a.date ? `<div style="font-size:11px; color:var(--muted); margin-top:4px;">Semana: ${esc(a.date)}</div>` : ""}
+          </div></a>`;
+      } else {
+        const aaiiErr = (data.errors && data.errors.find(e => e.startsWith("AAII:"))) || (data.errors && data.errors.length ? data.errors[data.errors.length - 1] : "No disponible");
+        aaiiWrap.innerHTML = `<div class="market-state state-unknown" style="height:100%; flex-direction:column; align-items:flex-start; gap:6px; padding:14px 16px; box-sizing:border-box;">
+          <div style="font-weight:600; font-size:14px;">AAII Sentiment Survey (semanal)</div>
+          <div style="font-size:12px; color:var(--muted);">${esc(aaiiErr)}</div>
+          <button class="btn-retry" onclick="loadSentiment()" style="margin-top:auto;">Reintentar</button>
+        </div>`;
+      }
+    }
+  } catch (e) {
+    const err = `<div class="market-state state-unknown">Error: ${esc(e.message)} <button class="btn-retry" onclick="loadSentiment()">Reintentar</button></div>`;
+    if (fgWrap) fgWrap.innerHTML = err;
+    if (aaiiWrap) aaiiWrap.innerHTML = err;
   }
 }
 
@@ -1007,21 +1127,32 @@ async function loadSectorLeadersTrail(weeks = CURRENT_RS_WEEKS) {
   }
 }
 
-async function reloadMarketContext() {
-  const btn = $("reload-market-context");
-  const icon = $("reload-icon");
-  const text = $("reload-text");
+async function reloadMarketState() {
+  const btn = $("reload-market-state");
+  const text = $("reload-market-text");
+  if (btn) btn.disabled = true;
+  if (text) text.textContent = "Recargando…";
+  try {
+    await loadMarketState();
+  } finally {
+    if (btn) btn.disabled = false;
+    if (text) text.textContent = "Recargar";
+  }
+}
+
+async function reloadSectorRotation() {
+  const btn = $("reload-sector-rotation");
+  const text = $("reload-sector-text");
   if (btn) btn.disabled = true;
   if (text) text.textContent = "Recargando…";
   try {
     await Promise.allSettled([
-      loadMarketState(),
       loadSectorLeaders(CURRENT_RS_WEEKS),
       loadSectorLeadersTrail(CURRENT_RS_WEEKS)
     ]);
   } finally {
     if (btn) btn.disabled = false;
-    if (text) text.textContent = "Recargar datos";
+    if (text) text.textContent = "Recargar";
   }
 }
 
@@ -1040,16 +1171,16 @@ async function checkIndustryLeaders() {
         if (data.status === "calculating") {
       btn.disabled = true;
       if (data.phase === "fetching_sectors") {
-        status.textContent = `Consultando Finviz: sector ${data.done}/${data.total} `
-          + `(${esc(data.current || "")})…`;
+        status.innerHTML = `<span class="spinner"></span><span class="loading-text">Consultando Finviz: sector ${data.done}/${data.total} `
+          + `(${esc(data.current || "")})…</span>`;
       } else if (data.phase === "scoring_industries" && data.total > 0) {
         const eta = data.eta_seconds > 0
           ? ` — ~${Math.ceil(data.eta_seconds / 60)} min restantes`
           : "";
-        status.textContent = `Calculando RS: ${data.done}/${data.total} industrias `
-          + `(${esc(data.current || "")})${eta}`;
+        status.innerHTML = `<span class="spinner"></span><span class="loading-text">Calculando RS: ${data.done}/${data.total} industrias `
+          + `(${esc(data.current || "")})${eta}</span>`;
       } else {
-        status.textContent = "Calculando…";
+        status.innerHTML = '<span class="spinner"></span><span class="loading-text">Calculando…</span>';
       }
       if (!INDUSTRY_POLL_TIMER) INDUSTRY_POLL_TIMER = setInterval(checkIndustryLeaders, 3000);
       return;
@@ -1092,7 +1223,7 @@ async function calculateIndustryLeaders() {
   const btn = $("calc-industry-leaders");
   const status = $("industry-leaders-status");
   btn.disabled = true;
-  status.textContent = "Calculando…";
+  status.innerHTML = '<span class="spinner"></span><span class="loading-text">Calculando…</span>';
 
   // Arranca el polling YA, en paralelo al POST -- no esperamos a que el POST
   // resuelva para empezar a preguntar por el progreso, porque el POST no
@@ -1118,16 +1249,34 @@ async function calculateIndustryLeaders() {
 
 async function boot() {
   loadMarketState();
+  loadSentiment();
   loadSectorLeaders(CURRENT_RS_WEEKS);
   loadSectorLeadersTrail(CURRENT_RS_WEEKS);
   checkIndustryLeaders();
-  $("reload-market-context").addEventListener("click", reloadMarketContext);
+  $("reload-market-state").addEventListener("click", reloadMarketState);
+  $("reload-sentiment").addEventListener("click", async () => {
+    const text = $("reload-sentiment-text");
+    const btn = $("reload-sentiment");
+    if (text) text.textContent = "Recargando…";
+    if (btn) btn.disabled = true;
+    try {
+      await loadSentiment();
+    } finally {
+      if (text) text.textContent = "Recargar";
+      if (btn) btn.disabled = false;
+    }
+  });
+  $("reload-sector-rotation").addEventListener("click", reloadSectorRotation);
   document.querySelectorAll(".rs-tf-btn").forEach(btn => {
     btn.addEventListener("click", () => setRsTimeframe(parseInt(btn.dataset.weeks)));
   });
   $("calc-industry-leaders").addEventListener("click", calculateIndustryLeaders);
   $("tab-screen").addEventListener("click", () => switchTab("screen"));
-  $("tab-rotation").addEventListener("click", () => switchTab("rotation"));
+  $("tab-market-state").addEventListener("click", () => switchTab("market-state"));
+  $("tab-sector-rotation").addEventListener("click", () => switchTab("sector-rotation"));
+  $("ctx-region-us").addEventListener("click", () => setCtxRegion("us"));
+  $("ctx-region-intl").addEventListener("click", () => setCtxRegion("international"));
+  
   $("mode-us").addEventListener("click", () => setMode("us"));
   $("mode-intl").addEventListener("click", () => setMode("international"));
   $("us_source").addEventListener("change", onUsSourceChange);
@@ -1431,15 +1580,26 @@ function updateIntlSource() {
 }
 
 function switchTab(which) {
-  const screen = which === "screen";
-  $("tab-screen").setAttribute("aria-pressed", screen);
-  $("tab-rotation").setAttribute("aria-pressed", !screen);
-  $("view-screen").classList.toggle("hidden", !screen);
-  $("view-rotation").classList.toggle("hidden", screen);
-  if (!screen) {
+  $("tab-screen").setAttribute("aria-pressed", which === "screen");
+  $("tab-market-state").setAttribute("aria-pressed", which === "market-state");
+  $("tab-sector-rotation").setAttribute("aria-pressed", which === "sector-rotation");
+  
+  $("view-screen").classList.toggle("hidden", which !== "screen");
+  $("view-market-state").classList.toggle("hidden", which !== "market-state");
+  $("view-sector-rotation").classList.toggle("hidden", which !== "sector-rotation");
+  
+  if (which === "market-state") {
     const longWrap = $("market-state-long-wrap");
     if (longWrap && (longWrap.querySelector(".loading") || longWrap.querySelector(".state-unknown"))) {
       loadMarketState();
+    }
+    const fgWrap = $("fear-greed-wrap");
+    if (fgWrap && (fgWrap.querySelector(".loading") || fgWrap.querySelector(".state-unknown"))) {
+      loadSentiment();
+    }
+  } else if (which === "sector-rotation") {
+    const table = $("sector-leaders-table");
+    if (table && (!table.innerHTML || table.querySelector(".leaders-empty"))) {
       loadSectorLeaders(CURRENT_RS_WEEKS);
       loadSectorLeadersTrail(CURRENT_RS_WEEKS);
     }
@@ -1453,8 +1613,13 @@ async function runScreen() {
   const status = $("status");
   btn.disabled = true;
   status.className = "";
-  status.textContent = "Running — fetching prices, scanning and drawing charts. This can take a minute.";
+  status.innerHTML = '<span class="spinner"></span><span class="loading-text">Iniciando escaneo…</span>';
+  
+  // Limpiar resultados y gráficos anteriores
+  RESULT = { columns: [], rows: [], charts: {}, count: 0 };
+  $("results").classList.add("hidden");
   $("summary").classList.add("hidden");
+  $("vimg").innerHTML = "";
 
   const usMarket = () => {
     const src = $("us_source").value;
@@ -1486,6 +1651,19 @@ async function runScreen() {
     market: mode === "us" ? usMarket() : intlMarket()
   };
 
+  let pollTimer = setInterval(async () => {
+    try {
+      const pr = await fetch("/api/run-progress").then(r => r.json());
+      if (pr && pr.running) {
+        const pct = pr.total > 0 ? Math.round((pr.done / pr.total) * 100) : 0;
+        const eta = pr.eta_seconds != null ? ` — ETA: ${pr.eta_seconds}s` : "";
+        status.innerHTML = `<span class="spinner"></span><span class="loading-text">Escaneando ${pct}% (${pr.done}/${pr.total})${eta}</span>`;
+      }
+    } catch (e) {
+      // Ignorar errores puntuales de polling
+    }
+  }, 1000);
+
   try {
     const res = await fetch("/api/run", {
       method: "POST",
@@ -1509,6 +1687,7 @@ async function runScreen() {
     $("results").classList.add("hidden");
     $("summary").classList.add("hidden");
   } finally {
+    clearInterval(pollTimer);
     btn.disabled = false;
   }
 }
